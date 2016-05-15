@@ -18,9 +18,10 @@
 If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
+<!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/proposals/federation.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.2/docs/proposals/federation.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -77,7 +78,7 @@ The above use cases are by necessity left imprecisely defined.  The
 rest of this document explores these use cases and their implications
 in further detail, and compares a few alternative high level
 approaches to addressing them.  The idea of cluster federation has
-informally become known as_ "Ubernetes"_.
+informally become known as _"Ubernetes"_.
 
 ## Summary/TL;DR
 
@@ -110,7 +111,7 @@ and cheap network within each cluster.
 There is also assumed to be some degree of failure correlation across
 a cluster, i.e.  whole clusters are expected to fail, at least
 occasionally (due to cluster-wide power and network failures, natural
-disasters etc). Clusters are often relatively homogenous in that all
+disasters etc). Clusters are often relatively homogeneous in that all
 compute nodes are typically provided by a single cloud provider or
 hardware vendor, and connected by a common, unified network fabric.
 But these are not hard requirements of Kubernetes.

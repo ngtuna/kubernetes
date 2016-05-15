@@ -18,28 +18,24 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-GINKGO_PARALLEL=${GINKGO_PARALLEL:-n} # set to 'y' to run tests in parallel
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
-
 source "${KUBE_ROOT}/cluster/common.sh"
 source "${KUBE_ROOT}/hack/lib/init.sh"
 
-# Ginkgo will build the e2e tests, so we need to make sure that the environment
-# is set up correctly (including Godeps, etc).
-kube::golang::setup_env
 # Find the ginkgo binary build as part of the release.
 ginkgo=$(kube::util::find-binary "ginkgo")
 e2e_test=$(kube::util::find-binary "e2e.test")
 
 # --- Setup some env vars.
 
-: ${KUBE_VERSION_ROOT:=${KUBE_ROOT}}
-: ${KUBECTL:="${KUBE_VERSION_ROOT}/cluster/kubectl.sh"}
+GINKGO_PARALLEL=${GINKGO_PARALLEL:-n} # set to 'y' to run tests in parallel
+
+: ${KUBECTL:="${KUBE_ROOT}/cluster/kubectl.sh"}
 : ${KUBE_CONFIG_FILE:="config-test.sh"}
 
 export KUBECTL KUBE_CONFIG_FILE
 
-source "${KUBE_ROOT}/cluster/kube-env.sh"
+source "${KUBE_ROOT}/cluster/kube-util.sh"
 
 # ---- Do cloud-provider-specific setup
 if [[ -n "${KUBERNETES_CONFORMANCE_TEST:-}" ]]; then
@@ -53,8 +49,6 @@ if [[ -n "${KUBERNETES_CONFORMANCE_TEST:-}" ]]; then
     )
 else
     echo "Setting up for KUBERNETES_PROVIDER=\"${KUBERNETES_PROVIDER}\"."
-
-    source "${KUBE_VERSION_ROOT}/cluster/${KUBERNETES_PROVIDER}/util.sh"
 
     prepare-e2e
 
@@ -81,10 +75,11 @@ if [[ -n "${CONFORMANCE_TEST_SKIP_REGEX:-}" ]]; then
   ginkgo_args+=("--skip=${CONFORMANCE_TEST_SKIP_REGEX}")
   ginkgo_args+=("--seed=1436380640")
 fi
-if [[ ${GINKGO_PARALLEL} =~ ^[yY]$ ]]; then
-  ginkgo_args+=("-p")
+if [[ -n "${GINKGO_PARALLEL_NODES:-}" ]]; then
+  ginkgo_args+=("--nodes=${GINKGO_PARALLEL_NODES}")
+elif [[ ${GINKGO_PARALLEL} =~ ^[yY]$ ]]; then
+  ginkgo_args+=("--nodes=30") # By default, set --nodes=30.
 fi
-
 
 # The --host setting is used only when providing --auth_config
 # If --kubeconfig is used, the host to use is retrieved from the .kubeconfig
@@ -97,13 +92,17 @@ export PATH=$(dirname "${e2e_test}"):"${PATH}"
   --provider="${KUBERNETES_PROVIDER}" \
   --gce-project="${PROJECT:-}" \
   --gce-zone="${ZONE:-}" \
+  --gce-service-account="${GCE_SERVICE_ACCOUNT:-}" \
   --gke-cluster="${CLUSTER_NAME:-}" \
   --kube-master="${KUBE_MASTER:-}" \
   --cluster-tag="${CLUSTER_ID:-}" \
-  --repo-root="${KUBE_VERSION_ROOT}" \
+  --repo-root="${KUBE_ROOT}" \
   --node-instance-group="${NODE_INSTANCE_GROUP:-}" \
-  --num-nodes="${NUM_MINIONS:-}" \
   --prefix="${KUBE_GCE_INSTANCE_PREFIX:-e2e}" \
+  ${KUBE_OS_DISTRIBUTION:+"--os-distro=${KUBE_OS_DISTRIBUTION}"} \
+  ${NUM_NODES:+"--num-nodes=${NUM_NODES}"} \
+  ${E2E_CLEAN_START:+"--clean-start=true"} \
   ${E2E_MIN_STARTUP_PODS:+"--minStartupPods=${E2E_MIN_STARTUP_PODS}"} \
   ${E2E_REPORT_DIR:+"--report-dir=${E2E_REPORT_DIR}"} \
+  ${E2E_REPORT_PREFIX:+"--report-prefix=${E2E_REPORT_PREFIX}"} \
   "${@:-}"

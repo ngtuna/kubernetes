@@ -14,7 +14,7 @@ kubectl run \- Run a particular image on the cluster.
 .SH DESCRIPTION
 .PP
 Create and run a particular image, possibly replicated.
-Creates a replication controller to manage the created container(s).
+Creates a deployment or job to manage the created container(s).
 
 
 .SH OPTIONS
@@ -40,7 +40,7 @@ Creates a replication controller to manage the created container(s).
 
 .PP
 \fB\-\-generator\fP=""
-    The name of the API generator to use.  Default is 'run/v1' if \-\-restart=Always, otherwise the default is 'run\-pod/v1'.
+    The name of the API generator to use.  Default is 'deployment/v1beta1' if \-\-restart=Always, otherwise the default is 'job/v1'.  This will happen only for cluster version at least 1.2, for olders we will fallback to 'run/v1' for \-\-restart=Always, 'run\-pod/v1' for others.
 
 .PP
 \fB\-\-hostport\fP=\-1
@@ -49,6 +49,10 @@ Creates a replication controller to manage the created container(s).
 .PP
 \fB\-\-image\fP=""
     The image for the container to run.
+
+.PP
+\fB\-\-include\-extended\-apis\fP=true
+    If true, include definitions of new APIs via calls to the API server. [default true]
 
 .PP
 \fB\-l\fP, \fB\-\-labels\fP=""
@@ -60,7 +64,7 @@ Creates a replication controller to manage the created container(s).
 
 .PP
 \fB\-\-limits\fP=""
-    The resource requirement limits for this container.  For example, 'cpu=200m,memory=512Mi'
+    The resource requirement limits for this container.  For example, 'cpu=200m,memory=512Mi'.  Note that server side components may assign limits depending on the server configuration, such as limit ranges.
 
 .PP
 \fB\-\-no\-headers\fP=false
@@ -74,7 +78,7 @@ Creates a replication controller to manage the created container(s).
 
 .PP
 \fB\-\-output\-version\fP=""
-    Output the formatted object with the given version (default api\-version).
+    Output the formatted object with the given group version (for ex: 'extensions/v1beta1').
 
 .PP
 \fB\-\-overrides\fP=""
@@ -85,16 +89,28 @@ Creates a replication controller to manage the created container(s).
     The port that this container exposes.  If \-\-expose is true, this is also the port used by the service that is created.
 
 .PP
+\fB\-\-record\fP=false
+    Record current kubectl command in the resource annotation.
+
+.PP
 \fB\-r\fP, \fB\-\-replicas\fP=1
     Number of replicas to create for this container. Default is 1.
 
 .PP
 \fB\-\-requests\fP=""
-    The resource requirement requests for this container.  For example, 'cpu=100m,memory=256Mi'
+    The resource requirement requests for this container.  For example, 'cpu=100m,memory=256Mi'.  Note that server side components may assign requests depending on the server configuration, such as limit ranges.
 
 .PP
 \fB\-\-restart\fP="Always"
-    The restart policy for this Pod.  Legal values [Always, OnFailure, Never].  If set to 'Always' a replication controller is created for this pod, if set to OnFailure or Never, only the Pod is created and \-\-replicas must be 1.  Default 'Always'
+    The restart policy for this Pod.  Legal values [Always, OnFailure, Never].  If set to 'Always' a deployment is created for this pod, if set to OnFailure or Never, a job is created for this pod and \-\-replicas must be 1.  Default 'Always'
+
+.PP
+\fB\-\-rm\fP=false
+    If true, delete resources created in this command for attached containers.
+
+.PP
+\fB\-\-save\-config\fP=false
+    If true, the configuration of current object will be saved in its annotation. This is useful when you want to perform kubectl apply on this object in the future.
 
 .PP
 \fB\-\-service\-generator\fP="service/v2"
@@ -109,8 +125,12 @@ Creates a replication controller to manage the created container(s).
     When printing, show all resources (default hide terminated pods.)
 
 .PP
+\fB\-\-show\-labels\fP=false
+    When printing, show all labels as the last column (default hide labels column)
+
+.PP
 \fB\-\-sort\-by\fP=""
-    If non\-empty, sort list types using this field specification.  The field specification is expressed as a JSONPath expression (e.g. 'ObjectMeta.Name'). The field in the API resource specified by this JSONPath expression must be an integer or a string.
+    If non\-empty, sort list types using this field specification.  The field specification is expressed as a JSONPath expression (e.g. '{.metadata.name}'). The field in the API resource specified by this JSONPath expression must be an integer or a string.
 
 .PP
 \fB\-i\fP, \fB\-\-stdin\fP=false
@@ -122,8 +142,8 @@ Creates a replication controller to manage the created container(s).
 \[la]http://golang.org/pkg/text/template/#pkg-overview\[ra]].
 
 .PP
-\fB\-\-tty\fP=false
-    Allocated a TTY for each container in the pod.  Because \-t is currently shorthand for \-\-template, \-t is not supported for \-\-tty. This shorthand is deprecated and we expect to adopt \-t for \-\-tty soon.
+\fB\-t\fP, \fB\-\-tty\fP=false
+    Allocated a TTY for each container in the pod.
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
@@ -133,7 +153,11 @@ Creates a replication controller to manage the created container(s).
 
 .PP
 \fB\-\-api\-version\fP=""
-    The API version to use when talking to the server
+    DEPRECATED: The API version to use when talking to the server
+
+.PP
+\fB\-\-as\fP=""
+    Username to impersonate for the operation.
 
 .PP
 \fB\-\-certificate\-authority\fP=""
@@ -141,7 +165,7 @@ Creates a replication controller to manage the created container(s).
 
 .PP
 \fB\-\-client\-certificate\fP=""
-    Path to a client key file for TLS.
+    Path to a client certificate file for TLS.
 
 .PP
 \fB\-\-client\-key\fP=""
@@ -226,31 +250,34 @@ Creates a replication controller to manage the created container(s).
 
 .nf
 # Start a single instance of nginx.
-$ kubectl run nginx \-\-image=nginx
+kubectl run nginx \-\-image=nginx
 
 # Start a single instance of hazelcast and let the container expose port 5701 .
-$ kubectl run hazelcast \-\-image=hazelcast \-\-port=5701
+kubectl run hazelcast \-\-image=hazelcast \-\-port=5701
 
 # Start a single instance of hazelcast and set environment variables "DNS\_DOMAIN=cluster" and "POD\_NAMESPACE=default" in the container.
-$ kubectl run hazelcast \-\-image=hazelcast \-\-env="DNS\_DOMAIN=cluster" \-\-env="POD\_NAMESPACE=default"
+kubectl run hazelcast \-\-image=hazelcast \-\-env="DNS\_DOMAIN=cluster" \-\-env="POD\_NAMESPACE=default"
 
 # Start a replicated instance of nginx.
-$ kubectl run nginx \-\-image=nginx \-\-replicas=5
+kubectl run nginx \-\-image=nginx \-\-replicas=5
 
 # Dry run. Print the corresponding API objects without creating them.
-$ kubectl run nginx \-\-image=nginx \-\-dry\-run
+kubectl run nginx \-\-image=nginx \-\-dry\-run
 
-# Start a single instance of nginx, but overload the spec of the replication controller with a partial set of values parsed from JSON.
-$ kubectl run nginx \-\-image=nginx \-\-overrides='{ "apiVersion": "v1", "spec": { ... } }'
+# Start a single instance of nginx, but overload the spec of the deployment with a partial set of values parsed from JSON.
+kubectl run nginx \-\-image=nginx \-\-overrides='{ "apiVersion": "v1", "spec": { ... } }'
 
-# Start a single instance of nginx and keep it in the foreground, don't restart it if it exits.
-$ kubectl run \-i \-tty nginx \-\-image=nginx \-\-restart=Never
+# Start a single instance of busybox and keep it in the foreground, don't restart it if it exits.
+kubectl run \-i \-t busybox \-\-image=busybox \-\-restart=Never
 
 # Start the nginx container using the default command, but use custom arguments (arg1 .. argN) for that command.
-$ kubectl run nginx \-\-image=nginx \-\- <arg1> <arg2> ... <argN>
+kubectl run nginx \-\-image=nginx \-\- <arg1> <arg2> ... <argN>
 
-# Start the nginx container using a different command and custom arguments
-$ kubectl run nginx \-\-image=nginx \-\-command \-\- <cmd> <arg1> ... <argN>
+# Start the nginx container using a different command and custom arguments.
+kubectl run nginx \-\-image=nginx \-\-command \-\- <cmd> <arg1> ... <argN>
+
+# Start the perl container to compute π to 2000 places and print it out.
+kubectl run pi \-\-image=perl \-\-restart=OnFailure \-\- perl \-Mbignum=bpi \-wle 'print bpi(2000)'
 
 .fi
 .RE

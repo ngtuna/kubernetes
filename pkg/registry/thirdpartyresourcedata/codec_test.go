@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/testapi"
 	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/apis/extensions"
@@ -41,7 +42,7 @@ type FooList struct {
 	unversioned.TypeMeta `json:",inline"`
 	unversioned.ListMeta `json:"metadata,omitempty" description:"standard list metadata; see http://releases.k8s.io/HEAD/docs/devel/api-conventions.md#metadata"`
 
-	items []Foo `json:"items"`
+	Items []Foo `json:"items"`
 }
 
 func TestCodec(t *testing.T) {
@@ -67,7 +68,7 @@ func TestCodec(t *testing.T) {
 			obj: &Foo{
 				ObjectMeta: api.ObjectMeta{
 					Name:              "bar",
-					CreationTimestamp: unversioned.Time{time.Unix(100, 0)},
+					CreationTimestamp: unversioned.Time{Time: time.Unix(100, 0)},
 				},
 				TypeMeta: unversioned.TypeMeta{Kind: "Foo"},
 			},
@@ -86,13 +87,14 @@ func TestCodec(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		codec := thirdPartyResourceDataCodec{kind: "Foo"}
+		d := &thirdPartyResourceDataDecoder{kind: "Foo", delegate: testapi.Extensions.Codec()}
+		e := &thirdPartyResourceDataEncoder{kind: "Foo", delegate: testapi.Extensions.Codec()}
 		data, err := json.Marshal(test.obj)
 		if err != nil {
 			t.Errorf("[%s] unexpected error: %v", test.name, err)
 			continue
 		}
-		obj, err := codec.Decode(data)
+		obj, err := runtime.Decode(d, data)
 		if err != nil && !test.expectErr {
 			t.Errorf("[%s] unexpected error: %v", test.name, err)
 			continue
@@ -120,7 +122,7 @@ func TestCodec(t *testing.T) {
 			t.Errorf("[%s]\nexpected\n%v\nsaw\n%v\n", test.name, test.obj, &output)
 		}
 
-		data, err = codec.Encode(rsrcObj)
+		data, err = runtime.Encode(e, rsrcObj)
 		if err != nil {
 			t.Errorf("[%s] unexpected error: %v", test.name, err)
 		}
@@ -140,35 +142,31 @@ func TestCreater(t *testing.T) {
 	creater := NewObjectCreator("creater group", "creater version", api.Scheme)
 	tests := []struct {
 		name        string
-		version     string
-		kind        string
+		kind        unversioned.GroupVersionKind
 		expectedObj runtime.Object
 		expectErr   bool
 	}{
 		{
 			name:        "valid ThirdPartyResourceData creation",
-			version:     "creater group/creater version",
-			kind:        "ThirdPartyResourceData",
+			kind:        unversioned.GroupVersionKind{Group: "creater group", Version: "creater version", Kind: "ThirdPartyResourceData"},
 			expectedObj: &extensions.ThirdPartyResourceData{},
 			expectErr:   false,
 		},
 		{
 			name:        "invalid ThirdPartyResourceData creation",
-			version:     "invalid version",
-			kind:        "ThirdPartyResourceData",
+			kind:        unversioned.GroupVersionKind{Version: "invalid version", Kind: "ThirdPartyResourceData"},
 			expectedObj: nil,
 			expectErr:   true,
 		},
 		{
 			name:        "valid ListOptions creation",
-			version:     "v1",
-			kind:        "ListOptions",
+			kind:        unversioned.GroupVersionKind{Version: "v1", Kind: "ListOptions"},
 			expectedObj: &v1.ListOptions{},
 			expectErr:   false,
 		},
 	}
 	for _, test := range tests {
-		out, err := creater.New(test.version, test.kind)
+		out, err := creater.New(test.kind)
 		if err != nil && !test.expectErr {
 			t.Errorf("[%s] unexpected error: %v", test.name, err)
 		}
@@ -176,7 +174,7 @@ func TestCreater(t *testing.T) {
 			t.Errorf("[%s] unexpected non-error", test.name)
 		}
 		if !reflect.DeepEqual(test.expectedObj, out) {
-			t.Errorf("[%s] unexpected error: expect: %v, got: %v", test.expectedObj, out)
+			t.Errorf("[%s] unexpected error: expect: %v, got: %v", test.name, test.expectedObj, out)
 		}
 
 	}

@@ -14,9 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# A library of helper functions that each provider hosting Kubernetes must implement to use cluster/kube-*.sh scripts.
+# This script contains skeletons of helper functions that each provider hosting
+# Kubernetes must implement to use cluster/kube-*.sh scripts.
+# It sets KUBERNETES_PROVIDER to its default value (gce) if it is unset, and
+# then sources cluster/${KUBERNETES_PROVIDER}/util.sh.
 
-KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
+KUBERNETES_PROVIDER="${KUBERNETES_PROVIDER:-gce}"
 
 # Must ensure that the following ENV vars are set
 function detect-master {
@@ -24,14 +27,14 @@ function detect-master {
 	echo "KUBE_MASTER: $KUBE_MASTER" 1>&2
 }
 
-# Get minion names if they are not static.
-function detect-minion-names {
-	echo "MINION_NAMES: [${MINION_NAMES[*]}]" 1>&2
+# Get node names if they are not static.
+function detect-node-names {
+	echo "NODE_NAMES: [${NODE_NAMES[*]}]" 1>&2
 }
 
-# Get minion IP addresses and store in KUBE_MINION_IP_ADDRESSES[]
-function detect-minions {
-	echo "KUBE_MINION_IP_ADDRESSES: [${KUBE_MINION_IP_ADDRESSES[*]}]" 1>&2
+# Get node IP addresses and store in KUBE_NODE_IP_ADDRESSES[]
+function detect-nodes {
+	echo "KUBE_NODE_IP_ADDRESSES: [${KUBE_NODE_IP_ADDRESSES[*]}]" 1>&2
 }
 
 # Verify prereqs on host machine
@@ -91,10 +94,8 @@ function test-teardown {
 	echo "TODO: test-teardown" 1>&2
 }
 
-# Providers util.sh scripts should define functions that override the above default functions impls
-if [ -n "${KUBERNETES_PROVIDER}" ]; then
-	PROVIDER_UTILS="${KUBE_ROOT}/cluster/${KUBERNETES_PROVIDER}/util.sh"
-	if [ -f ${PROVIDER_UTILS} ]; then
-		source "${PROVIDER_UTILS}"
-	fi
+KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
+PROVIDER_UTILS="${KUBE_ROOT}/cluster/${KUBERNETES_PROVIDER}/util.sh"
+if [ -f ${PROVIDER_UTILS} ]; then
+    source "${PROVIDER_UTILS}"
 fi

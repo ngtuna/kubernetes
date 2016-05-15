@@ -15,17 +15,23 @@
 # This file creates a build environment for building and running kubernetes
 # unit and integration tests
 
-FROM golang:1.4
-MAINTAINER  jeff lowdermilk <jeffml@google.com>
+FROM golang:1.6.2
+MAINTAINER  Jeff Lowdermilk <jeffml@google.com>
 
-ENV KUBE_TEST_API_VERSIONS  v1,extensions/v1beta1
-ENV KUBE_TEST_ETCD_PREFIXES registry
 ENV WORKSPACE               /workspace
+ENV TERM                    xterm
 
 WORKDIR /workspace
-ADD run.sh ./
 
 RUN apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y rsync
+# file is used when uploading test artifacts to GCS.
+RUN apt-get install -y file
+# libapparmor1 is needed for docker-in-docker.
+RUN apt-get install -y libapparmor1
+# netcat is used by integration test scripts.
+RUN apt-get install -y netcat-openbsd
+# jq is used by hack/verify-godep-licenses.sh
+RUN apt-get install -y jq
 RUN mkdir -p /go/src/k8s.io/kubernetes
 RUN ln -s /go/src/k8s.io/kubernetes /workspace/kubernetes
 

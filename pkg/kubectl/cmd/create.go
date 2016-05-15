@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/kubectl"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
@@ -34,6 +35,7 @@ import (
 // referencing the cmd.Flags()
 type CreateOptions struct {
 	Filenames []string
+	Recursive bool
 }
 
 const (
@@ -41,10 +43,10 @@ const (
 
 JSON and YAML formats are accepted.`
 	create_example = `# Create a pod using the data in pod.json.
-$ kubectl create -f ./pod.json
+kubectl create -f ./pod.json
 
 # Create a pod based on the JSON passed into stdin.
-$ cat pod.json | kubectl create -f -`
+cat pod.json | kubectl create -f -`
 )
 
 func NewCmdCreate(f *cmdutil.Factory, out io.Writer) *cobra.Command {
@@ -56,6 +58,10 @@ func NewCmdCreate(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 		Long:    create_long,
 		Example: create_example,
 		Run: func(cmd *cobra.Command, args []string) {
+			if len(options.Filenames) == 0 {
+				cmd.Help()
+				return
+			}
 			cmdutil.CheckErr(ValidateArgs(cmd, args))
 			cmdutil.CheckErr(cmdutil.ValidateOutputArgs(cmd))
 			cmdutil.CheckErr(RunCreate(f, cmd, out, options))
@@ -66,7 +72,17 @@ func NewCmdCreate(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	kubectl.AddJsonFilenameFlag(cmd, &options.Filenames, usage)
 	cmd.MarkFlagRequired("filename")
 	cmdutil.AddValidateFlags(cmd)
+	cmdutil.AddRecursiveFlag(cmd, &options.Recursive)
 	cmdutil.AddOutputFlagsForMutation(cmd)
+	cmdutil.AddApplyAnnotationFlags(cmd)
+	cmdutil.AddRecordFlag(cmd)
+	cmdutil.AddInclude3rdPartyFlags(cmd)
+
+	// create subcommands
+	cmd.AddCommand(NewCmdCreateNamespace(f, out))
+	cmd.AddCommand(NewCmdCreateSecret(f, out))
+	cmd.AddCommand(NewCmdCreateConfigMap(f, out))
+	cmd.AddCommand(NewCmdCreateServiceAccount(f, out))
 	return cmd
 }
 
@@ -88,12 +104,12 @@ func RunCreate(f *cmdutil.Factory, cmd *cobra.Command, out io.Writer, options *C
 		return err
 	}
 
-	mapper, typer := f.Object()
-	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+	mapper, typer := f.Object(cmdutil.GetIncludeThirdPartyAPIs(cmd))
+	r := resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
 		Schema(schema).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
-		FilenameParam(enforceNamespace, options.Filenames...).
+		FilenameParam(enforceNamespace, options.Recursive, options.Filenames...).
 		Flatten().
 		Do()
 	err = r.Err()
@@ -106,25 +122,21 @@ func RunCreate(f *cmdutil.Factory, cmd *cobra.Command, out io.Writer, options *C
 		if err != nil {
 			return err
 		}
-
-		// Update the annotation used by kubectl apply
-		if err := kubectl.UpdateApplyAnnotation(info); err != nil {
+		if err := kubectl.CreateOrUpdateAnnotation(cmdutil.GetFlagBool(cmd, cmdutil.ApplyAnnotationsFlag), info, f.JSONEncoder()); err != nil {
 			return cmdutil.AddSourceToErr("creating", info.Source, err)
 		}
 
-		// Serialize the object with the annotation applied.
-		data, err := info.Mapping.Codec.Encode(info.Object)
-		if err != nil {
-			return cmdutil.AddSourceToErr("creating", info.Source, err)
+		if cmdutil.ShouldRecord(cmd, info) {
+			if err := cmdutil.RecordChangeCause(info.Object, f.Command()); err != nil {
+				return cmdutil.AddSourceToErr("creating", info.Source, err)
+			}
 		}
 
-		obj, err := resource.NewHelper(info.Client, info.Mapping).Create(info.Namespace, true, data)
-		if err != nil {
+		if err := createAndRefresh(info); err != nil {
 			return cmdutil.AddSourceToErr("creating", info.Source, err)
 		}
 
 		count++
-		info.Refresh(obj, true)
 		shortOutput := cmdutil.GetFlagString(cmd, "output") == "name"
 		if !shortOutput {
 			printObjectSpecificMessage(info.Object, out)
@@ -161,7 +173,7 @@ See http://releases.k8s.io/HEAD/docs/user-guide/services-firewalls.md for more d
 func makePortsString(ports []api.ServicePort, useNodePort bool) string {
 	pieces := make([]string, len(ports))
 	for ix := range ports {
-		var port int
+		var port int32
 		if useNodePort {
 			port = ports[ix].NodePort
 		} else {
@@ -170,4 +182,81 @@ func makePortsString(ports []api.ServicePort, useNodePort bool) string {
 		pieces[ix] = fmt.Sprintf("%s:%d", strings.ToLower(string(ports[ix].Protocol)), port)
 	}
 	return strings.Join(pieces, ",")
+}
+
+// createAndRefresh creates an object from input info and refreshes info with that object
+func createAndRefresh(info *resource.Info) error {
+	obj, err := resource.NewHelper(info.Client, info.Mapping).Create(info.Namespace, true, info.Object)
+	if err != nil {
+		return err
+	}
+	info.Refresh(obj, true)
+	return nil
+}
+
+// NameFromCommandArgs is a utility function for commands that assume the first argument is a resource name
+func NameFromCommandArgs(cmd *cobra.Command, args []string) (string, error) {
+	if len(args) == 0 {
+		return "", cmdutil.UsageError(cmd, "NAME is required")
+	}
+	return args[0], nil
+}
+
+// CreateSubcommandOptions is an options struct to support create subcommands
+type CreateSubcommandOptions struct {
+	// Name of resource being created
+	Name string
+	// StructuredGenerator is the resource generator for the object being created
+	StructuredGenerator kubectl.StructuredGenerator
+	// DryRun is true if the command should be simulated but not run against the server
+	DryRun bool
+	// OutputFormat
+	OutputFormat string
+}
+
+// RunCreateSubcommand executes a create subcommand using the specified options
+func RunCreateSubcommand(f *cmdutil.Factory, cmd *cobra.Command, out io.Writer, options *CreateSubcommandOptions) error {
+	namespace, _, err := f.DefaultNamespace()
+	if err != nil {
+		return err
+	}
+	obj, err := options.StructuredGenerator.StructuredGenerate()
+	if err != nil {
+		return err
+	}
+	mapper, typer := f.Object(cmdutil.GetIncludeThirdPartyAPIs(cmd))
+	gvk, err := typer.ObjectKind(obj)
+	mapping, err := mapper.RESTMapping(unversioned.GroupKind{Group: gvk.Group, Kind: gvk.Kind}, gvk.Version)
+	if err != nil {
+		return err
+	}
+	client, err := f.ClientForMapping(mapping)
+	if err != nil {
+		return err
+	}
+	resourceMapper := &resource.Mapper{
+		ObjectTyper:  typer,
+		RESTMapper:   mapper,
+		ClientMapper: resource.ClientMapperFunc(f.ClientForMapping),
+	}
+	info, err := resourceMapper.InfoForObject(obj, nil)
+	if err != nil {
+		return err
+	}
+	if err := kubectl.UpdateApplyAnnotation(info, f.JSONEncoder()); err != nil {
+		return err
+	}
+	if !options.DryRun {
+		obj, err = resource.NewHelper(client, mapping).Create(namespace, false, info.Object)
+		if err != nil {
+			return err
+		}
+	}
+
+	if useShortOutput := options.OutputFormat == "name"; useShortOutput || len(options.OutputFormat) == 0 {
+		cmdutil.PrintSuccess(mapper, useShortOutput, out, mapping.Resource, options.Name, "created")
+		return nil
+	}
+
+	return f.PrintObject(cmd, mapper, obj, out)
 }

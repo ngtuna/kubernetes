@@ -6,13 +6,23 @@ base:
 {% if grains.get('cloud') == 'aws' %}
     - ntp
 {% endif %}
+{% if pillar.get('e2e_storage_test_environment', '').lower() == 'true' %}
+    - e2e
+{% endif %}
 
   'roles:kubernetes-pool':
     - match: grain
     - docker
+{% if pillar.get('network_provider', '').lower() == 'flannel' %}
+    - flannel
+{% elif pillar.get('network_provider', '').lower() == 'kubenet' %}
+    - cni
+{% elif pillar.get('network_provider', '').lower() == 'cni' %}
+    - cni
+{% endif %}
     - helpers
-    - cadvisor
     - kube-client-tools
+    - kube-node-unpacker
     - kubelet
 {% if pillar.get('network_provider', '').lower() == 'opencontrail' %}
     - opencontrail-networking-minion
@@ -30,28 +40,24 @@ base:
     - kube-registry-proxy
 {% endif %}
     - logrotate
-{% if grains['cloud'] is defined and grains.cloud == 'gce' %}
     - supervisor
-{% else %}
-    - monit
-{% endif %}
 
   'roles:kubernetes-master':
     - match: grain
     - generate-cert
     - etcd
+{% if pillar.get('network_provider', '').lower() == 'flannel' %}
+    - flannel-server
+    - flannel
+{% elif pillar.get('network_provider', '').lower() == 'kubenet' %}
+    - cni
+{% elif pillar.get('network_provider', '').lower() == 'cni' %}
+    - cni
+{% endif %}
     - kube-apiserver
     - kube-controller-manager
     - kube-scheduler
-{% if grains['cloud'] is defined and grains.cloud == 'gce' %}
     - supervisor
-{% else %}
-    - monit
-{% endif %}
-{% if grains['cloud'] is defined and not grains.cloud in [ 'aws', 'gce', 'vagrant' ] %}
-    - nginx
-{% endif %}
-    - cadvisor
     - kube-client-tools
     - kube-master-addons
     - kube-admission-controls
@@ -66,14 +72,13 @@ base:
     - logrotate
 {% endif %}
     - kube-addons
-{% if grains['cloud'] is defined and grains['cloud'] in [ 'vagrant', 'gce', 'aws' ] %}
+{% if grains['cloud'] is defined and grains['cloud'] in [ 'vagrant', 'gce', 'aws', 'vsphere', 'photon-controller', 'openstack'] %}
     - docker
     - kubelet
 {% endif %}
 {% if pillar.get('network_provider', '').lower() == 'opencontrail' %}
     - opencontrail-networking-master
 {% endif %}
-
-  'roles:kubernetes-pool-vsphere':
-    - match: grain
-    - static-routes
+{% if pillar.get('enable_node_autoscaler', '').lower() == 'true' %}
+    - cluster-autoscaler
+{% endif %}

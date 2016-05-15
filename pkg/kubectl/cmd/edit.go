@@ -19,22 +19,23 @@ package cmd
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"runtime"
+	"path/filepath"
+	gruntime "runtime"
 	"strings"
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/kubectl"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/util/editor"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/util/jsonmerge"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/util/crlf"
 	"k8s.io/kubernetes/pkg/util/strategicpatch"
 	"k8s.io/kubernetes/pkg/util/yaml"
 
@@ -46,9 +47,9 @@ const (
 	editLong = `Edit a resource from the default editor.
 
 The edit command allows you to directly edit any API resource you can retrieve via the
-command line tools. It will open the editor defined by your KUBE_EDITOR, GIT_EDITOR,
-or EDITOR environment variables, or fall back to 'vi' for Linux or 'notepad' for Windows.
-You can edit multiple objects, although changes are applied one at a time. The command 
+command line tools. It will open the editor defined by your KUBE_EDITOR, or EDITOR
+environment variables, or fall back to 'vi' for Linux or 'notepad' for Windows.
+You can edit multiple objects, although changes are applied one at a time. The command
 accepts filenames as well as command line arguments, although the files you point to must
 be previously saved versions of resources.
 
@@ -64,41 +65,64 @@ to apply your changes to the newer version of the resource, or update your tempo
 saved copy to include the latest resource version.`
 
 	editExample = `  # Edit the service named 'docker-registry':
-  $ kubectl edit svc/docker-registry
+  kubectl edit svc/docker-registry
 
   # Use an alternative editor
-  $ KUBE_EDITOR="nano" kubectl edit svc/docker-registry
+  KUBE_EDITOR="nano" kubectl edit svc/docker-registry
 
   # Edit the service 'docker-registry' in JSON using the v1 API format:
-  $ kubectl edit svc/docker-registry --output-version=v1 -o json`
+  kubectl edit svc/docker-registry --output-version=v1 -o json`
 )
+
+// EditOptions is the start of the data required to perform the operation.  As new fields are added, add them here instead of
+// referencing the cmd.Flags()
+type EditOptions struct {
+	Filenames []string
+	Recursive bool
+}
 
 var errExit = fmt.Errorf("exit directly")
 
-func NewCmdEdit(f *cmdutil.Factory, out io.Writer) *cobra.Command {
-	filenames := []string{}
+func NewCmdEdit(f *cmdutil.Factory, out, errOut io.Writer) *cobra.Command {
+	options := &EditOptions{}
+
+	// retrieve a list of handled resources from printer as valid args
+	validArgs, argAliases := []string{}, []string{}
+	p, err := f.Printer(nil, false, false, false, false, false, false, []string{})
+	cmdutil.CheckErr(err)
+	if p != nil {
+		validArgs = p.HandledResources()
+		argAliases = kubectl.ResourceAliases(validArgs)
+	}
+
 	cmd := &cobra.Command{
 		Use:     "edit (RESOURCE/NAME | -f FILENAME)",
 		Short:   "Edit a resource on the server",
 		Long:    editLong,
 		Example: fmt.Sprintf(editExample),
 		Run: func(cmd *cobra.Command, args []string) {
-			err := RunEdit(f, out, cmd, args, filenames)
+			err := RunEdit(f, out, errOut, cmd, args, options)
 			if err == errExit {
 				os.Exit(1)
 			}
 			cmdutil.CheckErr(err)
 		},
+		ValidArgs:  validArgs,
+		ArgAliases: argAliases,
 	}
 	usage := "Filename, directory, or URL to file to use to edit the resource"
-	kubectl.AddJsonFilenameFlag(cmd, &filenames, usage)
+	kubectl.AddJsonFilenameFlag(cmd, &options.Filenames, usage)
+	cmdutil.AddRecursiveFlag(cmd, &options.Recursive)
 	cmd.Flags().StringP("output", "o", "yaml", "Output format. One of: yaml|json.")
-	cmd.Flags().String("output-version", "", "Output the formatted object with the given version (default api-version).")
-	cmd.Flags().Bool("windows-line-endings", runtime.GOOS == "windows", "Use Windows line-endings (default Unix line-endings)")
+	cmd.Flags().String("output-version", "", "Output the formatted object with the given group version (for ex: 'extensions/v1beta1').")
+	cmd.Flags().Bool("windows-line-endings", gruntime.GOOS == "windows", "Use Windows line-endings (default Unix line-endings)")
+	cmdutil.AddApplyAnnotationFlags(cmd)
+	cmdutil.AddRecordFlag(cmd)
+	cmdutil.AddInclude3rdPartyFlags(cmd)
 	return cmd
 }
 
-func RunEdit(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []string, filenames []string) error {
+func RunEdit(f *cmdutil.Factory, out, errOut io.Writer, cmd *cobra.Command, args []string, options *EditOptions) error {
 	var printer kubectl.ResourcePrinter
 	var ext string
 	switch format := cmdutil.GetFlagString(cmd, "output"); format {
@@ -117,16 +141,23 @@ func RunEdit(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	mapper, typer := f.Object()
-	rmap := &resource.Mapper{
+	mapper, typer := f.Object(cmdutil.GetIncludeThirdPartyAPIs(cmd))
+	resourceMapper := &resource.Mapper{
 		ObjectTyper:  typer,
 		RESTMapper:   mapper,
-		ClientMapper: f.ClientMapperForCommand(),
+		ClientMapper: resource.ClientMapperFunc(f.ClientForMapping),
+
+		// NB: we use `f.Decoder(false)` to get a plain deserializer for
+		// the resourceMapper, since it's used to read in edits and
+		// we don't want to convert into the internal version when
+		// reading in edits (this would cause us to potentially try to
+		// compare two different GroupVersions).
+		Decoder: f.Decoder(false),
 	}
 
-	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+	r := resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
 		NamespaceParam(cmdNamespace).DefaultNamespace().
-		FilenameParam(enforceNamespace, filenames...).
+		FilenameParam(enforceNamespace, options.Recursive, options.Filenames...).
 		ResourceTypeOrNameArgs(true, args...).
 		Latest().
 		Flatten().
@@ -146,68 +177,90 @@ func RunEdit(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	windowsLineEndings := cmdutil.GetFlagBool(cmd, "windows-line-endings")
-	edit := editor.NewDefaultEditor()
-	defaultVersion := cmdutil.OutputVersion(cmd, clientConfig.Version)
-	results := editResults{}
-	for {
-		objs, err := resource.AsVersionedObjects(infos, defaultVersion)
-		if err != nil {
-			return preservedFile(err, results.file, out)
-		}
-		// if input object is a list, traverse and edit each item one at a time
-		for _, obj := range objs {
-			// TODO: add an annotating YAML printer that can print inline comments on each field,
-			//   including descriptions or validation errors
+	encoder := f.JSONEncoder()
+	defaultVersion, err := cmdutil.OutputVersion(cmd, clientConfig.GroupVersion)
+	if err != nil {
+		return err
+	}
+	objs, err := resource.AsVersionedObjects(infos, defaultVersion, encoder)
+	if err != nil {
+		return err
+	}
 
+	var (
+		windowsLineEndings = cmdutil.GetFlagBool(cmd, "windows-line-endings")
+		edit               = editor.NewDefaultEditor(f.EditorEnvs())
+		results            = editResults{}
+		original           = []byte{}
+		edited             = []byte{}
+		file               string
+	)
+
+outter:
+	for i := range objs {
+		obj := objs[i]
+		// some bookkeeping
+		results.header.flush()
+		containsError := false
+
+		for {
 			// generate the file to edit
 			buf := &bytes.Buffer{}
 			var w io.Writer = buf
 			if windowsLineEndings {
-				w = util.NewCRLFWriter(w)
+				w = crlf.NewCRLFWriter(w)
 			}
 			if err := results.header.writeTo(w); err != nil {
-				return preservedFile(err, results.file, out)
+				return preservedFile(err, results.file, errOut)
 			}
-			if err := printer.PrintObj(obj, w); err != nil {
-				return preservedFile(err, results.file, out)
+			if !containsError {
+				if err := printer.PrintObj(obj, w); err != nil {
+					return preservedFile(err, results.file, errOut)
+				}
+				original = buf.Bytes()
+			} else {
+				// In case of an error, preserve the edited file.
+				// Remove the comments (header) from it since we already
+				// have included the latest header in the buffer above.
+				buf.Write(manualStrip(edited))
 			}
-			original := buf.Bytes()
 
 			// launch the editor
-			edited, file, err := edit.LaunchTempFile("kubectl-edit-", ext, buf)
+			editedDiff := edited
+			edited, file, err = edit.LaunchTempFile(fmt.Sprintf("%s-edit-", filepath.Base(os.Args[0])), ext, buf)
 			if err != nil {
-				return preservedFile(err, results.file, out)
+				return preservedFile(err, results.file, errOut)
+			}
+			if bytes.Equal(stripComments(editedDiff), stripComments(edited)) {
+				// Ugly hack right here. We will hit this either (1) when we try to
+				// save the same changes we tried to save in the previous iteration
+				// which means our changes are invalid or (2) when we exit the second
+				// time. The second case is more usual so we can probably live with it.
+				// TODO: A less hacky fix would be welcome :)
+				fmt.Fprintln(errOut, "Edit cancelled, no valid changes were saved.")
+				continue outter
 			}
 
 			// cleanup any file from the previous pass
 			if len(results.file) > 0 {
 				os.Remove(results.file)
 			}
-
 			glog.V(4).Infof("User edited:\n%s", string(edited))
-			lines, err := hasLines(bytes.NewBuffer(edited))
-			if err != nil {
-				return preservedFile(err, file, out)
-			}
+
 			// Compare content without comments
 			if bytes.Equal(stripComments(original), stripComments(edited)) {
-				if len(results.edit) > 0 {
-					preservedFile(nil, file, out)
-				} else {
-					os.Remove(file)
-				}
-				fmt.Fprintln(out, "Edit cancelled, no changes made.")
-				continue
+				os.Remove(file)
+				fmt.Fprintln(errOut, "Edit cancelled, no changes made.")
+				continue outter
+			}
+			lines, err := hasLines(bytes.NewBuffer(edited))
+			if err != nil {
+				return preservedFile(err, file, errOut)
 			}
 			if !lines {
-				if len(results.edit) > 0 {
-					preservedFile(nil, file, out)
-				} else {
-					os.Remove(file)
-				}
-				fmt.Fprintln(out, "Edit cancelled, saved file was empty.")
-				continue
+				os.Remove(file)
+				fmt.Fprintln(errOut, "Edit cancelled, saved file was empty.")
+				continue outter
 			}
 
 			results = editResults{
@@ -215,31 +268,46 @@ func RunEdit(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []strin
 			}
 
 			// parse the edited file
-			updates, err := rmap.InfoForData(edited, "edited-file")
+			updates, err := resourceMapper.InfoForData(edited, "edited-file")
 			if err != nil {
-				return fmt.Errorf("The edited file had a syntax error: %v", err)
+				// syntax error
+				containsError = true
+				results.header.reasons = append(results.header.reasons, editReason{head: fmt.Sprintf("The edited file had a syntax error: %v", err)})
+				continue
+			}
+			// not a syntax error as it turns out...
+			containsError = false
+
+			// put configuration annotation in "updates"
+			if err := kubectl.CreateOrUpdateAnnotation(cmdutil.GetFlagBool(cmd, cmdutil.ApplyAnnotationsFlag), updates, encoder); err != nil {
+				return preservedFile(err, file, errOut)
+			}
+			if cmdutil.ShouldRecord(cmd, updates) {
+				err = cmdutil.RecordChangeCause(updates.Object, f.Command())
+				if err != nil {
+					return err
+				}
+			}
+			editedCopy := edited
+			if editedCopy, err = runtime.Encode(encoder, updates.Object); err != nil {
+				return preservedFile(err, file, errOut)
 			}
 
-			// annotate the edited object for kubectl apply
-			if err := kubectl.UpdateApplyAnnotation(updates); err != nil {
-				return preservedFile(err, file, out)
-			}
-
-			visitor := resource.NewFlattenListVisitor(updates, rmap)
+			visitor := resource.NewFlattenListVisitor(updates, resourceMapper)
 
 			// need to make sure the original namespace wasn't changed while editing
 			if err = visitor.Visit(resource.RequireNamespace(cmdNamespace)); err != nil {
-				return preservedFile(err, file, out)
+				return preservedFile(err, file, errOut)
 			}
 
 			// use strategic merge to create a patch
 			originalJS, err := yaml.ToJSON(original)
 			if err != nil {
-				return preservedFile(err, file, out)
+				return preservedFile(err, file, errOut)
 			}
-			editedJS, err := yaml.ToJSON(edited)
+			editedJS, err := yaml.ToJSON(editedCopy)
 			if err != nil {
-				return preservedFile(err, file, out)
+				return preservedFile(err, file, errOut)
 			}
 			patch, err := strategicpatch.CreateStrategicMergePatch(originalJS, editedJS, obj)
 			// TODO: change all jsonmerge to strategicpatch
@@ -247,7 +315,7 @@ func RunEdit(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []strin
 			preconditions := []jsonmerge.PreconditionFunc{}
 			if err != nil {
 				glog.V(4).Infof("Unable to calculate diff, no merge is possible: %v", err)
-				return preservedFile(err, file, out)
+				return preservedFile(err, file, errOut)
 			} else {
 				preconditions = append(preconditions, jsonmerge.RequireKeyUnchanged("apiVersion"))
 				preconditions = append(preconditions, jsonmerge.RequireKeyUnchanged("kind"))
@@ -256,57 +324,44 @@ func RunEdit(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []strin
 			}
 
 			if hold, msg := jsonmerge.TestPreconditionsHold(patch, preconditions); !hold {
-				fmt.Fprintf(out, "error: %s", msg)
-				return preservedFile(nil, file, out)
+				fmt.Fprintf(errOut, "error: %s\n", msg)
+				return preservedFile(nil, file, errOut)
 			}
 
+			errorMsg := ""
 			err = visitor.Visit(func(info *resource.Info, err error) error {
 				patched, err := resource.NewHelper(info.Client, info.Mapping).Patch(info.Namespace, info.Name, api.StrategicMergePatchType, patch)
 				if err != nil {
-					fmt.Fprintln(out, results.addError(err, info))
-					return nil
+					errorMsg = results.addError(err, info)
+					return err
 				}
 				info.Refresh(patched, true)
 				cmdutil.PrintSuccess(mapper, false, out, info.Mapping.Resource, info.Name, "edited")
 				return nil
 			})
-			if err != nil {
-				return preservedFile(err, file, out)
+			if err == nil {
+				os.Remove(file)
+				continue outter
 			}
-
+			// Handle all possible errors
+			//
+			// 1. retryable: propose kubectl replace -f
+			// 2. notfound: indicate the location of the saved configuration of the deleted resource
+			// 3. invalid: retry those on the spot by looping ie. reloading the editor
 			if results.retryable > 0 {
-				fmt.Fprintf(out, "You can run `kubectl replace -f %s` to try this update again.\n", file)
-				return errExit
+				fmt.Fprintln(errOut, errorMsg)
+				fmt.Fprintf(errOut, "You can run `%s replace -f %s` to try this update again.\n", filepath.Base(os.Args[0]), file)
+				continue outter
 			}
-			if results.conflict > 0 {
-				fmt.Fprintf(out, "You must update your local resource version and run `kubectl replace -f %s` to overwrite the remote changes.\n", file)
-				return errExit
+			if results.notfound > 0 {
+				fmt.Fprintln(errOut, errorMsg)
+				fmt.Fprintf(errOut, "The edits you made on deleted resources have been saved to %q\n", file)
+				continue outter
 			}
-			if len(results.edit) == 0 {
-				if results.notfound == 0 {
-					os.Remove(file)
-				} else {
-					fmt.Fprintf(out, "The edits you made on deleted resources have been saved to %q\n", file)
-				}
-			}
+			// validation error
+			containsError = true
 		}
-		if len(results.edit) == 0 {
-			return nil
-		}
-
-		// loop again and edit the remaining items
-		infos = results.edit
 	}
-	return nil
-}
-
-// print json file (such as patch file) content for debugging
-func printJson(out io.Writer, file []byte) error {
-	diff := make(map[string]interface{})
-	if err := json.Unmarshal(file, &diff); err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "%v\n", diff)
 	return nil
 }
 
@@ -342,16 +397,19 @@ func (h *editHeader) writeTo(w io.Writer) error {
 	return nil
 }
 
+func (h *editHeader) flush() {
+	h.reasons = []editReason{}
+}
+
 // editResults capture the result of an update
 type editResults struct {
 	header    editHeader
 	retryable int
 	notfound  int
-	conflict  int
 	edit      []*resource.Info
 	file      string
 
-	version string
+	version unversioned.GroupVersion
 }
 
 func (r *editResults) addError(err error, info *resource.Info) string {
@@ -359,23 +417,23 @@ func (r *editResults) addError(err error, info *resource.Info) string {
 	case errors.IsInvalid(err):
 		r.edit = append(r.edit, info)
 		reason := editReason{
-			head: fmt.Sprintf("%s %s was not valid", info.Mapping.Kind, info.Name),
+			head: fmt.Sprintf("%s %q was not valid", info.Mapping.Resource, info.Name),
 		}
-		if err, ok := err.(client.APIStatus); ok {
+		if err, ok := err.(errors.APIStatus); ok {
 			if details := err.Status().Details; details != nil {
 				for _, cause := range details.Causes {
-					reason.other = append(reason.other, cause.Message)
+					reason.other = append(reason.other, fmt.Sprintf("%s: %s", cause.Field, cause.Message))
 				}
 			}
 		}
 		r.header.reasons = append(r.header.reasons, reason)
-		return fmt.Sprintf("Error: the %s %s is invalid", info.Mapping.Kind, info.Name)
+		return fmt.Sprintf("error: %s %q is invalid", info.Mapping.Resource, info.Name)
 	case errors.IsNotFound(err):
 		r.notfound++
-		return fmt.Sprintf("Error: the %s %s could not be found on the server", info.Mapping.Kind, info.Name)
+		return fmt.Sprintf("error: %s %q could not be found on the server", info.Mapping.Resource, info.Name)
 	default:
 		r.retryable++
-		return fmt.Sprintf("Error: the %s %s could not be patched: %v", info.Mapping.Kind, info.Name, err)
+		return fmt.Sprintf("error: %s %q could not be patched: %v", info.Mapping.Resource, info.Name, err)
 	}
 }
 
@@ -413,7 +471,8 @@ func hasLines(r io.Reader) (bool, error) {
 // in it. Note that if the given file has a syntax error, the transformation will
 // fail and we will manually drop all comments from the file.
 func stripComments(file []byte) []byte {
-	stripped, err := yaml.ToJSON(file)
+	stripped := file
+	stripped, err := yaml.ToJSON(stripped)
 	if err != nil {
 		stripped = manualStrip(file)
 	}
@@ -423,12 +482,15 @@ func stripComments(file []byte) []byte {
 // manualStrip is used for dropping comments from a YAML file
 func manualStrip(file []byte) []byte {
 	stripped := []byte{}
-	for _, line := range bytes.Split(file, []byte("\n")) {
+	lines := bytes.Split(file, []byte("\n"))
+	for i, line := range lines {
 		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("#")) {
 			continue
 		}
 		stripped = append(stripped, line...)
-		stripped = append(stripped, '\n')
+		if i < len(lines)-1 {
+			stripped = append(stripped, '\n')
+		}
 	}
 	return stripped
 }

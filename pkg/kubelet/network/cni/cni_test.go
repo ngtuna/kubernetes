@@ -28,27 +28,22 @@ import (
 	"testing"
 	"text/template"
 
-	docker "github.com/fsouza/go-dockerclient"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 
+	"k8s.io/kubernetes/cmd/kubelet/app/options"
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/apis/componentconfig"
 	"k8s.io/kubernetes/pkg/client/record"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	containertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/dockertools"
 	"k8s.io/kubernetes/pkg/kubelet/network"
+	nettest "k8s.io/kubernetes/pkg/kubelet/network/testing"
 	proberesults "k8s.io/kubernetes/pkg/kubelet/prober/results"
-	"k8s.io/kubernetes/pkg/util/sets"
+	utiltesting "k8s.io/kubernetes/pkg/util/testing"
 )
-
-// The temp dir where test plugins will be stored.
-func tmpDirOrDie() string {
-	dir, err := ioutil.TempDir(os.TempDir(), "cni-test")
-	if err != nil {
-		panic(fmt.Sprintf("error creating tmp dir: %v", err))
-	}
-	return dir
-}
 
 func installPluginUnderTest(t *testing.T, testVendorCNIDirPrefix, testNetworkConfigPath, vendorName string, plugName string) {
 	pluginDir := path.Join(testNetworkConfigPath, plugName)
@@ -119,10 +114,10 @@ func tearDownPlugin(tmpDir string) {
 }
 
 type fakeNetworkHost struct {
-	kubeClient client.Interface
+	kubeClient clientset.Interface
 }
 
-func NewFakeHost(kubeClient client.Interface) *fakeNetworkHost {
+func NewFakeHost(kubeClient clientset.Interface) *fakeNetworkHost {
 	host := &fakeNetworkHost{kubeClient: kubeClient}
 	return host
 }
@@ -131,33 +126,35 @@ func (fnh *fakeNetworkHost) GetPodByName(name, namespace string) (*api.Pod, bool
 	return nil, false
 }
 
-func (fnh *fakeNetworkHost) GetKubeClient() client.Interface {
+func (fnh *fakeNetworkHost) GetKubeClient() clientset.Interface {
 	return nil
 }
 
 func (nh *fakeNetworkHost) GetRuntime() kubecontainer.Runtime {
 	dm, fakeDockerClient := newTestDockerManager()
-	fakeDockerClient.Container = &docker.Container{
-		ID:    "foobar",
-		State: docker.State{Pid: 12345},
-	}
+	fakeDockerClient.SetFakeRunningContainers([]*dockertools.FakeContainer{
+		{
+			ID:  "test_infra_container",
+			Pid: 12345,
+		},
+	})
 	return dm
 }
 
 func newTestDockerManager() (*dockertools.DockerManager, *dockertools.FakeDockerClient) {
-	fakeDocker := &dockertools.FakeDockerClient{VersionInfo: docker.Env{"Version=1.1.3", "ApiVersion=1.15"}, Errors: make(map[string]error), RemovedImages: sets.String{}}
+	fakeDocker := dockertools.NewFakeDockerClient()
 	fakeRecorder := &record.FakeRecorder{}
 	containerRefManager := kubecontainer.NewRefManager()
-	networkPlugin, _ := network.InitNetworkPlugin([]network.NetworkPlugin{}, "", network.NewFakeHost(nil))
+	networkPlugin, _ := network.InitNetworkPlugin([]network.NetworkPlugin{}, "", nettest.NewFakeHost(nil), componentconfig.HairpinNone)
 	dockerManager := dockertools.NewFakeDockerManager(
 		fakeDocker,
 		fakeRecorder,
 		proberesults.NewManager(),
 		containerRefManager,
 		&cadvisorapi.MachineInfo{},
-		dockertools.PodInfraContainerImage,
+		options.GetDefaultPodInfraContainerImage(),
 		0, 0, "",
-		kubecontainer.FakeOS{},
+		&containertest.FakeOS{},
 		networkPlugin,
 		nil,
 		nil,
@@ -171,19 +168,19 @@ func TestCNIPlugin(t *testing.T) {
 	pluginName := fmt.Sprintf("test%d", rand.Intn(1000))
 	vendorName := fmt.Sprintf("test_vendor%d", rand.Intn(1000))
 
-	tmpDir := tmpDirOrDie()
+	tmpDir := utiltesting.MkTmpdirOrDie("cni-test")
 	testNetworkConfigPath := path.Join(tmpDir, "plugins", "net", "cni")
 	testVendorCNIDirPrefix := tmpDir
 	defer tearDownPlugin(tmpDir)
 	installPluginUnderTest(t, testVendorCNIDirPrefix, testNetworkConfigPath, vendorName, pluginName)
 
 	np := probeNetworkPluginsWithVendorCNIDirPrefix(path.Join(testNetworkConfigPath, pluginName), testVendorCNIDirPrefix)
-	plug, err := network.InitNetworkPlugin(np, "cni", NewFakeHost(nil))
+	plug, err := network.InitNetworkPlugin(np, "cni", NewFakeHost(nil), componentconfig.HairpinNone)
 	if err != nil {
 		t.Fatalf("Failed to select the desired plugin: %v", err)
 	}
 
-	err = plug.SetUpPod("podNamespace", "podName", "dockerid2345")
+	err = plug.SetUpPod("podNamespace", "podName", kubecontainer.ContainerID{Type: "docker", ID: "test_infra_container"})
 	if err != nil {
 		t.Errorf("Expected nil: %v", err)
 	}
@@ -194,16 +191,16 @@ func TestCNIPlugin(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to read output file %s: %v (env %s err %v)", outputFile, err, eo, eerr)
 	}
-	expectedOutput := "ADD /proc/12345/ns/net podNamespace podName dockerid2345"
+	expectedOutput := "ADD /proc/12345/ns/net podNamespace podName test_infra_container"
 	if string(output) != expectedOutput {
 		t.Errorf("Mismatch in expected output for setup hook. Expected '%s', got '%s'", expectedOutput, string(output))
 	}
-	err = plug.TearDownPod("podNamespace", "podName", "dockerid4545454")
+	err = plug.TearDownPod("podNamespace", "podName", kubecontainer.ContainerID{Type: "docker", ID: "test_infra_container"})
 	if err != nil {
 		t.Errorf("Expected nil: %v", err)
 	}
 	output, err = ioutil.ReadFile(path.Join(testNetworkConfigPath, pluginName, pluginName+".out"))
-	expectedOutput = "DEL /proc/12345/ns/net podNamespace podName dockerid4545454"
+	expectedOutput = "DEL /proc/12345/ns/net podNamespace podName test_infra_container"
 	if string(output) != expectedOutput {
 		t.Errorf("Mismatch in expected output for setup hook. Expected '%s', got '%s'", expectedOutput, string(output))
 	}

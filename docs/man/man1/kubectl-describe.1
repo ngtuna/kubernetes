@@ -27,10 +27,11 @@ will first check for an exact match on TYPE and NAME\_PREFIX. If no such resourc
 exists, it will output details for every resource that has a name prefixed with NAME\_PREFIX
 
 .PP
-Possible resource types include (case insensitive): pods (po), services (svc),
-replicationcontrollers (rc), nodes (no), events (ev), limitranges (limits),
-persistentvolumes (pv), persistentvolumeclaims (pvc), resourcequotas (quota),
-namespaces (ns), serviceaccounts or secrets.
+Possible resource types include (case insensitive): pods (po), services (svc), deployments,
+replicasets (rs), replicationcontrollers (rc), nodes (no), events (ev), limitranges (limits),
+persistentvolumes (pv), persistentvolumeclaims (pvc), resourcequotas (quota), namespaces (ns),
+serviceaccounts (sa), ingresses (ing), horizontalpodautoscalers (hpa), daemonsets (ds), configmaps,
+componentstatuses (cs), endpoints (ep), and secrets.
 
 
 .SH OPTIONS
@@ -39,8 +40,20 @@ namespaces (ns), serviceaccounts or secrets.
     Filename, directory, or URL to a file containing the resource to describe
 
 .PP
+\fB\-\-include\-extended\-apis\fP=true
+    If true, include definitions of new APIs via calls to the API server. [default true]
+
+.PP
+\fB\-R\fP, \fB\-\-recursive\fP=false
+    If true, process directory recursively.
+
+.PP
 \fB\-l\fP, \fB\-\-selector\fP=""
     Selector (label query) to filter on
+
+.PP
+\fB\-\-show\-events\fP=true
+    If true, display events related to the described object.
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
@@ -50,7 +63,11 @@ namespaces (ns), serviceaccounts or secrets.
 
 .PP
 \fB\-\-api\-version\fP=""
-    The API version to use when talking to the server
+    DEPRECATED: The API version to use when talking to the server
+
+.PP
+\fB\-\-as\fP=""
+    Username to impersonate for the operation.
 
 .PP
 \fB\-\-certificate\-authority\fP=""
@@ -58,7 +75,7 @@ namespaces (ns), serviceaccounts or secrets.
 
 .PP
 \fB\-\-client\-certificate\fP=""
-    Path to a client key file for TLS.
+    Path to a client certificate file for TLS.
 
 .PP
 \fB\-\-client\-key\fP=""
@@ -143,23 +160,23 @@ namespaces (ns), serviceaccounts or secrets.
 
 .nf
 # Describe a node
-$ kubectl describe nodes kubernetes\-minion\-emt8.c.myproject.internal
+kubectl describe nodes kubernetes\-minion\-emt8.c.myproject.internal
 
 # Describe a pod
-$ kubectl describe pods/nginx
+kubectl describe pods/nginx
 
 # Describe a pod identified by type and name in "pod.json"
-$ kubectl describe \-f pod.json
+kubectl describe \-f pod.json
 
 # Describe all pods
-$ kubectl describe pods
+kubectl describe pods
 
 # Describe pods by label name=myLabel
-$ kubectl describe po \-l name=myLabel
+kubectl describe po \-l name=myLabel
 
 # Describe all pods managed by the 'frontend' replication controller (rc\-created pods
 # get the name of the rc as a prefix in the pod the name).
-$ kubectl describe pods frontend
+kubectl describe pods frontend
 
 .fi
 .RE

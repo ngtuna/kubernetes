@@ -27,8 +27,9 @@ import (
 	"k8s.io/kubernetes/pkg/client/record"
 	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
 	"k8s.io/kubernetes/pkg/kubelet/container"
-	"k8s.io/kubernetes/pkg/util"
+	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/util/wait"
 )
 
 // Manages lifecycle of all images.
@@ -41,6 +42,8 @@ type imageManager interface {
 
 	// Start async garbage collection of images.
 	Start() error
+
+	GetImageList() ([]kubecontainer.Image, error)
 
 	// TODO(vmarmol): Have this subsume pulls as well.
 }
@@ -55,6 +58,9 @@ type ImageGCPolicy struct {
 	// Any usage below this threshold will never trigger garbage collection.
 	// This is the lowest threshold we will try to garbage collect to.
 	LowThresholdPercent int
+
+	// Minimum age at which a image can be garbage collected.
+	MinAge time.Duration
 }
 
 type realImageManager struct {
@@ -76,12 +82,15 @@ type realImageManager struct {
 
 	// Reference to this node.
 	nodeRef *api.ObjectReference
+
+	// Track initialization
+	initialized bool
 }
 
 // Information about the images we track.
 type imageRecord struct {
 	// Time when this image was first detected.
-	detected time.Time
+	firstDetected time.Time
 
 	// Time when we last saw this image being used.
 	lastUsed time.Time
@@ -98,6 +107,9 @@ func newImageManager(runtime container.Runtime, cadvisorInterface cadvisor.Inter
 	if policy.LowThresholdPercent < 0 || policy.LowThresholdPercent > 100 {
 		return nil, fmt.Errorf("invalid LowThresholdPercent %d, must be in range [0-100]", policy.LowThresholdPercent)
 	}
+	if policy.LowThresholdPercent > policy.HighThresholdPercent {
+		return nil, fmt.Errorf("LowThresholdPercent %d can not be higher than HighThresholdPercent %d", policy.LowThresholdPercent, policy.HighThresholdPercent)
+	}
 	im := &realImageManager{
 		runtime:      runtime,
 		policy:       policy,
@@ -105,30 +117,40 @@ func newImageManager(runtime container.Runtime, cadvisorInterface cadvisor.Inter
 		cadvisor:     cadvisorInterface,
 		recorder:     recorder,
 		nodeRef:      nodeRef,
+		initialized:  false,
 	}
 
 	return im, nil
 }
 
 func (im *realImageManager) Start() error {
-	// Initial detection make detected time "unknown" in the past.
-	var zero time.Time
-	err := im.detectImages(zero)
-	if err != nil {
-		return err
-	}
-
-	go util.Until(func() {
-		err := im.detectImages(time.Now())
+	go wait.Until(func() {
+		// Initial detection make detected time "unknown" in the past.
+		var ts time.Time
+		if im.initialized {
+			ts = time.Now()
+		}
+		err := im.detectImages(ts)
 		if err != nil {
 			glog.Warningf("[ImageManager] Failed to monitor images: %v", err)
+		} else {
+			im.initialized = true
 		}
-	}, 5*time.Minute, util.NeverStop)
+	}, 5*time.Minute, wait.NeverStop)
 
 	return nil
 }
 
-func (im *realImageManager) detectImages(detected time.Time) error {
+// Get a list of images on this node
+func (im *realImageManager) GetImageList() ([]kubecontainer.Image, error) {
+	images, err := im.runtime.ListImages()
+	if err != nil {
+		return nil, err
+	}
+	return images, nil
+}
+
+func (im *realImageManager) detectImages(detectTime time.Time) error {
 	images, err := im.runtime.ListImages()
 	if err != nil {
 		return err
@@ -142,6 +164,7 @@ func (im *realImageManager) detectImages(detected time.Time) error {
 	imagesInUse := sets.NewString()
 	for _, pod := range pods {
 		for _, container := range pod.Containers {
+			glog.V(5).Infof("Pod %s/%s, container %s uses image %s", pod.Namespace, pod.Name, container.Name, container.Image)
 			imagesInUse.Insert(container.Image)
 		}
 	}
@@ -152,26 +175,31 @@ func (im *realImageManager) detectImages(detected time.Time) error {
 	im.imageRecordsLock.Lock()
 	defer im.imageRecordsLock.Unlock()
 	for _, image := range images {
+		glog.V(5).Infof("Adding image ID %s to currentImages", image.ID)
 		currentImages.Insert(image.ID)
 
 		// New image, set it as detected now.
 		if _, ok := im.imageRecords[image.ID]; !ok {
+			glog.V(5).Infof("Image ID %s is new", image.ID)
 			im.imageRecords[image.ID] = &imageRecord{
-				detected: detected,
+				firstDetected: detectTime,
 			}
 		}
 
 		// Set last used time to now if the image is being used.
 		if isImageUsed(image, imagesInUse) {
+			glog.V(5).Infof("Setting Image ID %s lastUsed to %v", image.ID, now)
 			im.imageRecords[image.ID].lastUsed = now
 		}
 
+		glog.V(5).Infof("Image ID %s has size %d", image.ID, image.Size)
 		im.imageRecords[image.ID].size = image.Size
 	}
 
 	// Remove old images from our records.
 	for image := range im.imageRecords {
 		if !currentImages.Has(image) {
+			glog.V(5).Infof("Image ID %s is no longer present; removing from imageRecords", image)
 			delete(im.imageRecords, image)
 		}
 	}
@@ -191,7 +219,7 @@ func (im *realImageManager) GarbageCollect() error {
 	// Check valid capacity.
 	if capacity == 0 {
 		err := fmt.Errorf("invalid capacity %d on device %q at mount point %q", capacity, fsInfo.Device, fsInfo.Mountpoint)
-		im.recorder.Eventf(im.nodeRef, "InvalidDiskCapacity", err.Error())
+		im.recorder.Eventf(im.nodeRef, api.EventTypeWarning, container.InvalidDiskCapacity, err.Error())
 		return err
 	}
 
@@ -200,14 +228,14 @@ func (im *realImageManager) GarbageCollect() error {
 	if usagePercent >= im.policy.HighThresholdPercent {
 		amountToFree := usage - (int64(im.policy.LowThresholdPercent) * capacity / 100)
 		glog.Infof("[ImageManager]: Disk usage on %q (%s) is at %d%% which is over the high threshold (%d%%). Trying to free %d bytes", fsInfo.Device, fsInfo.Mountpoint, usagePercent, im.policy.HighThresholdPercent, amountToFree)
-		freed, err := im.freeSpace(amountToFree)
+		freed, err := im.freeSpace(amountToFree, time.Now())
 		if err != nil {
 			return err
 		}
 
 		if freed < amountToFree {
 			err := fmt.Errorf("failed to garbage collect required amount of images. Wanted to free %d, but freed %d", amountToFree, freed)
-			im.recorder.Eventf(im.nodeRef, "FreeDiskSpaceFailed", err.Error())
+			im.recorder.Eventf(im.nodeRef, api.EventTypeWarning, container.FreeDiskSpaceFailed, err.Error())
 			return err
 		}
 	}
@@ -221,9 +249,8 @@ func (im *realImageManager) GarbageCollect() error {
 // bytes freed is always returned.
 // Note that error may be nil and the number of bytes free may be less
 // than bytesToFree.
-func (im *realImageManager) freeSpace(bytesToFree int64) (int64, error) {
-	startTime := time.Now()
-	err := im.detectImages(startTime)
+func (im *realImageManager) freeSpace(bytesToFree int64, freeTime time.Time) (int64, error) {
+	err := im.detectImages(freeTime)
 	if err != nil {
 		return 0, err
 	}
@@ -245,9 +272,19 @@ func (im *realImageManager) freeSpace(bytesToFree int64) (int64, error) {
 	var lastErr error
 	spaceFreed := int64(0)
 	for _, image := range images {
+		glog.V(5).Infof("Evaluating image ID %s for possible garbage collection", image.id)
 		// Images that are currently in used were given a newer lastUsed.
-		if image.lastUsed.After(startTime) {
+		if image.lastUsed.Equal(freeTime) || image.lastUsed.After(freeTime) {
+			glog.V(5).Infof("Image ID %s has lastUsed=%v which is >= freeTime=%v, not eligible for garbage collection", image.id, image.lastUsed, freeTime)
 			break
+		}
+
+		// Avoid garbage collect the image if the image is not old enough.
+		// In such a case, the image may have just been pulled down, and will be used by a container right away.
+
+		if freeTime.Sub(image.firstDetected) < im.policy.MinAge {
+			glog.V(5).Infof("Image ID %s has age %v which is less than the policy's minAge of %v, not eligible for garbage collection", image.id, freeTime.Sub(image.firstDetected), im.policy.MinAge)
+			continue
 		}
 
 		// Remove image. Continue despite errors.
@@ -280,18 +317,18 @@ func (ev byLastUsedAndDetected) Swap(i, j int) { ev[i], ev[j] = ev[j], ev[i] }
 func (ev byLastUsedAndDetected) Less(i, j int) bool {
 	// Sort by last used, break ties by detected.
 	if ev[i].lastUsed.Equal(ev[j].lastUsed) {
-		return ev[i].detected.Before(ev[j].detected)
+		return ev[i].firstDetected.Before(ev[j].firstDetected)
 	} else {
 		return ev[i].lastUsed.Before(ev[j].lastUsed)
 	}
 }
 
 func isImageUsed(image container.Image, imagesInUse sets.String) bool {
-	// Check the image ID and all the RepoTags.
+	// Check the image ID and all the RepoTags and RepoDigests.
 	if _, ok := imagesInUse[image.ID]; ok {
 		return true
 	}
-	for _, tag := range image.Tags {
+	for _, tag := range append(image.RepoTags, image.RepoDigests...) {
 		if _, ok := imagesInUse[tag]; ok {
 			return true
 		}

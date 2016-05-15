@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/meta"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/watch"
@@ -88,8 +89,8 @@ func (f *FakeControllerSource) DeleteDropWatch(lastValue runtime.Object) {
 	f.Change(watch.Event{Type: watch.Deleted, Object: lastValue}, 0)
 }
 
-func (f *FakeControllerSource) key(meta *api.ObjectMeta) nnu {
-	return nnu{meta.Namespace, meta.Name, meta.UID}
+func (f *FakeControllerSource) key(accessor meta.Object) nnu {
+	return nnu{accessor.GetNamespace(), accessor.GetName(), accessor.GetUID()}
 }
 
 // Change records the given event (setting the object's resource version) and
@@ -98,15 +99,15 @@ func (f *FakeControllerSource) Change(e watch.Event, watchProbability float64) {
 	f.lock.Lock()
 	defer f.lock.Unlock()
 
-	objMeta, err := api.ObjectMetaFor(e.Object)
+	accessor, err := meta.Accessor(e.Object)
 	if err != nil {
 		panic(err) // this is test code only
 	}
 
 	resourceVersion := len(f.changes) + 1
-	objMeta.ResourceVersion = strconv.Itoa(resourceVersion)
+	accessor.SetResourceVersion(strconv.Itoa(resourceVersion))
 	f.changes = append(f.changes, e)
-	key := f.key(objMeta)
+	key := f.key(accessor)
 	switch e.Type {
 	case watch.Added, watch.Modified:
 		f.items[key] = e.Object
@@ -120,7 +121,7 @@ func (f *FakeControllerSource) Change(e watch.Event, watchProbability float64) {
 }
 
 // List returns a list object, with its resource version set.
-func (f *FakeControllerSource) List() (runtime.Object, error) {
+func (f *FakeControllerSource) List(options api.ListOptions) (runtime.Object, error) {
 	f.lock.RLock()
 	defer f.lock.RUnlock()
 	list := make([]runtime.Object, 0, len(f.items))
@@ -136,7 +137,7 @@ func (f *FakeControllerSource) List() (runtime.Object, error) {
 		list = append(list, objCopy.(runtime.Object))
 	}
 	listObj := &api.List{}
-	if err := runtime.SetList(listObj, list); err != nil {
+	if err := meta.SetList(listObj, list); err != nil {
 		return nil, err
 	}
 	objMeta, err := api.ListMetaFor(listObj)

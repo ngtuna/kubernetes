@@ -18,16 +18,18 @@ package e2e
 
 import (
 	"fmt"
+	"strings"
+
 	. "github.com/onsi/ginkgo"
 	api "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"strings"
+	"k8s.io/kubernetes/test/e2e/framework"
 )
 
 const (
-	kubeletEtcHostsImageName          = "gcr.io/google_containers/netexec:1.0"
+	kubeletEtcHostsImageName          = "gcr.io/google_containers/netexec:1.4"
 	kubeletEtcHostsPodName            = "test-pod"
 	kubeletEtcHostsHostNetworkPodName = "test-host-network-pod"
 	etcHostsPartialContent            = "# Kubernetes-managed hosts file."
@@ -36,11 +38,11 @@ const (
 type KubeletManagedHostConfig struct {
 	hostNetworkPod *api.Pod
 	pod            *api.Pod
-	f              *Framework
+	f              *framework.Framework
 }
 
-var _ = Describe("KubeletManagedEtcHosts", func() {
-	f := NewFramework("e2e-kubelet-etc-hosts")
+var _ = framework.KubeDescribe("KubeletManagedEtcHosts", func() {
+	f := framework.NewDefaultFramework("e2e-kubelet-etc-hosts")
 	config := &KubeletManagedHostConfig{
 		f: f,
 	}
@@ -93,12 +95,12 @@ func (config *KubeletManagedHostConfig) createPodWithHostNetwork() {
 func (config *KubeletManagedHostConfig) createPod(podSpec *api.Pod) *api.Pod {
 	createdPod, err := config.getPodClient().Create(podSpec)
 	if err != nil {
-		Failf("Failed to create %s pod: %v", podSpec.Name, err)
+		framework.Failf("Failed to create %s pod: %v", podSpec.Name, err)
 	}
-	expectNoError(config.f.WaitForPodRunning(podSpec.Name))
+	framework.ExpectNoError(config.f.WaitForPodRunning(podSpec.Name))
 	createdPod, err = config.getPodClient().Get(podSpec.Name)
 	if err != nil {
-		Failf("Failed to retrieve %s pod: %v", podSpec.Name, err)
+		framework.Failf("Failed to retrieve %s pod: %v", podSpec.Name, err)
 	}
 	return createdPod
 }
@@ -110,31 +112,31 @@ func (config *KubeletManagedHostConfig) getPodClient() client.PodInterface {
 func assertEtcHostsIsKubeletManaged(etcHostsContent string) {
 	isKubeletManaged := strings.Contains(etcHostsContent, etcHostsPartialContent)
 	if !isKubeletManaged {
-		Failf("/etc/hosts file should be kubelet managed, but is not: %q", etcHostsContent)
+		framework.Failf("/etc/hosts file should be kubelet managed, but is not: %q", etcHostsContent)
 	}
 }
 
 func assertEtcHostsIsNotKubeletManaged(etcHostsContent string) {
 	isKubeletManaged := strings.Contains(etcHostsContent, etcHostsPartialContent)
 	if isKubeletManaged {
-		Failf("/etc/hosts file should not be kubelet managed, but is: %q", etcHostsContent)
+		framework.Failf("/etc/hosts file should not be kubelet managed, but is: %q", etcHostsContent)
 	}
 }
 
 func (config *KubeletManagedHostConfig) getEtcHostsContent(podName, containerName string) string {
-	cmd := kubectlCmd("exec", fmt.Sprintf("--namespace=%v", config.f.Namespace.Name), podName, "-c", containerName, "cat", "/etc/hosts")
-	stdout, stderr, err := startCmdAndStreamOutput(cmd)
+	cmd := framework.KubectlCmd("exec", fmt.Sprintf("--namespace=%v", config.f.Namespace.Name), podName, "-c", containerName, "cat", "/etc/hosts")
+	stdout, stderr, err := framework.StartCmdAndStreamOutput(cmd)
 	if err != nil {
-		Failf("Failed to retrieve /etc/hosts, err: %q", err)
+		framework.Failf("Failed to retrieve /etc/hosts, err: %q", err)
 	}
 	defer stdout.Close()
 	defer stderr.Close()
 
 	buf := make([]byte, 1000)
 	var n int
-	Logf("reading from `kubectl exec` command's stdout")
+	framework.Logf("reading from `kubectl exec` command's stdout")
 	if n, err = stdout.Read(buf); err != nil {
-		Failf("Failed to read from kubectl exec stdout: %v", err)
+		framework.Failf("Failed to read from kubectl exec stdout: %v", err)
 	}
 	return string(buf[:n])
 }
@@ -143,7 +145,7 @@ func (config *KubeletManagedHostConfig) createPodSpec(podName string) *api.Pod {
 	pod := &api.Pod{
 		TypeMeta: unversioned.TypeMeta{
 			Kind:       "Pod",
-			APIVersion: latest.GroupOrDie("").Version,
+			APIVersion: registered.GroupOrDie(api.GroupName).GroupVersion.String(),
 		},
 		ObjectMeta: api.ObjectMeta{
 			Name:      podName,
@@ -204,7 +206,7 @@ func (config *KubeletManagedHostConfig) createPodSpecWithHostNetwork(podName str
 	pod := &api.Pod{
 		TypeMeta: unversioned.TypeMeta{
 			Kind:       "Pod",
-			APIVersion: latest.GroupOrDie("").Version,
+			APIVersion: registered.GroupOrDie(api.GroupName).GroupVersion.String(),
 		},
 		ObjectMeta: api.ObjectMeta{
 			Name:      podName,

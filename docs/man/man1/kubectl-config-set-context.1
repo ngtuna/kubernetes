@@ -38,7 +38,11 @@ Specifying a name that already exists will merge new fields on top of existing v
 
 .PP
 \fB\-\-api\-version\fP=""
-    The API version to use when talking to the server
+    DEPRECATED: The API version to use when talking to the server
+
+.PP
+\fB\-\-as\fP=""
+    Username to impersonate for the operation.
 
 .PP
 \fB\-\-certificate\-authority\fP=""
@@ -46,7 +50,7 @@ Specifying a name that already exists will merge new fields on top of existing v
 
 .PP
 \fB\-\-client\-certificate\fP=""
-    Path to a client key file for TLS.
+    Path to a client certificate file for TLS.
 
 .PP
 \fB\-\-client\-key\fP=""
@@ -119,7 +123,7 @@ Specifying a name that already exists will merge new fields on top of existing v
 
 .nf
 # Set the user field on the gce context entry without touching other values
-$ kubectl config set\-context gce \-\-user=cluster\-admin
+kubectl config set\-context gce \-\-user=cluster\-admin
 
 .fi
 .RE

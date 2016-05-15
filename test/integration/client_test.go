@@ -29,10 +29,10 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/testapi"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/version"
 	"k8s.io/kubernetes/pkg/watch"
 	"k8s.io/kubernetes/test/integration/framework"
@@ -44,9 +44,9 @@ func TestClient(t *testing.T) {
 
 	ns := api.NamespaceDefault
 	framework.DeleteAllEtcdKeys()
-	client := client.NewOrDie(&client.Config{Host: s.URL, Version: testapi.Default.Version()})
+	client := client.NewOrDie(&restclient.Config{Host: s.URL, ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}})
 
-	info, err := client.ServerVersion()
+	info, err := client.Discovery().ServerVersion()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestClient(t *testing.T) {
 		t.Errorf("expected %#v, got %#v", e, a)
 	}
 
-	pods, err := client.Pods(ns).List(labels.Everything(), fields.Everything())
+	pods, err := client.Pods(ns).List(api.ListOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestClient(t *testing.T) {
 	}
 
 	// pod is shown, but not scheduled
-	pods, err = client.Pods(ns).List(labels.Everything(), fields.Everything())
+	pods, err = client.Pods(ns).List(api.ListOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestSingleWatch(t *testing.T) {
 
 	ns := "blargh"
 	deleteAllEtcdKeys()
-	client := client.NewOrDie(&client.Config{Host: s.URL, Version: testapi.Default.Version()})
+	client := client.NewOrDie(&restclient.Config{Host: s.URL, ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}})
 
 	mkEvent := func(i int) *api.Event {
 		name := fmt.Sprintf("event-%v", i)
@@ -161,8 +161,8 @@ func TestSingleWatch(t *testing.T) {
 	defer w.Stop()
 
 	select {
-	case <-time.After(util.ForeverTestTimeout):
-		t.Fatalf("watch took longer than %s", util.ForeverTestTimeout.String())
+	case <-time.After(wait.ForeverTestTimeout):
+		t.Fatalf("watch took longer than %s", wait.ForeverTestTimeout.String())
 	case got, ok := <-w.ResultChan():
 		if !ok {
 			t.Fatal("Watch channel closed unexpectedly.")
@@ -198,7 +198,7 @@ func TestMultiWatch(t *testing.T) {
 	defer s.Close()
 
 	ns := api.NamespaceDefault
-	client := client.NewOrDie(&client.Config{Host: s.URL, Version: testapi.Default.Version()})
+	client := client.NewOrDie(&restclient.Config{Host: s.URL, ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}})
 
 	dummyEvent := func(i int) *api.Event {
 		name := fmt.Sprintf("unrelated-%v", i)
@@ -235,7 +235,7 @@ func TestMultiWatch(t *testing.T) {
 			Spec: api.PodSpec{
 				Containers: []api.Container{{
 					Name:  "nothing",
-					Image: "kubernetes/pause",
+					Image: "gcr.io/google_containers/pause-amd64:3.0",
 				}},
 			},
 		})
@@ -244,11 +244,11 @@ func TestMultiWatch(t *testing.T) {
 			t.Fatalf("Couldn't make %v: %v", name, err)
 		}
 		go func(name, rv string) {
-			w, err := client.Pods(ns).Watch(
-				labels.Set{"watchlabel": name}.AsSelector(),
-				fields.Everything(),
-				api.ListOptions{ResourceVersion: rv},
-			)
+			options := api.ListOptions{
+				LabelSelector:   labels.Set{"watchlabel": name}.AsSelector(),
+				ResourceVersion: rv,
+			}
+			w, err := client.Pods(ns).Watch(options)
 			if err != nil {
 				panic(fmt.Sprintf("watch error for %v: %v", name, err))
 			}
@@ -341,7 +341,7 @@ func TestMultiWatch(t *testing.T) {
 						Spec: api.PodSpec{
 							Containers: []api.Container{{
 								Name:  "nothing",
-								Image: "kubernetes/pause",
+								Image: "gcr.io/google_containers/pause-amd64:3.0",
 							}},
 						},
 					})
@@ -372,7 +372,7 @@ func TestMultiWatch(t *testing.T) {
 			if err != nil {
 				panic(fmt.Sprintf("Couldn't get %v: %v", name, err))
 			}
-			pod.Spec.Containers[0].Image = "kubernetes/pause:1"
+			pod.Spec.Containers[0].Image = "gcr.io/google_containers/pause-amd64:3.0"
 			sentTimes <- timePair{time.Now(), name}
 			if _, err := client.Pods(ns).Update(pod); err != nil {
 				panic(fmt.Sprintf("Couldn't make %v: %v", name, err))

@@ -17,22 +17,23 @@ limitations under the License.
 package admission
 
 import (
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/auth/user"
 	"k8s.io/kubernetes/pkg/runtime"
 )
 
 type attributesRecord struct {
-	kind        string
+	kind        unversioned.GroupVersionKind
 	namespace   string
 	name        string
-	resource    string
+	resource    unversioned.GroupVersionResource
 	subresource string
 	operation   Operation
 	object      runtime.Object
 	userInfo    user.Info
 }
 
-func NewAttributesRecord(object runtime.Object, kind, namespace, name, resource, subresource string, operation Operation, userInfo user.Info) Attributes {
+func NewAttributesRecord(object runtime.Object, kind unversioned.GroupVersionKind, namespace, name string, resource unversioned.GroupVersionResource, subresource string, operation Operation, userInfo user.Info) Attributes {
 	return &attributesRecord{
 		kind:        kind,
 		namespace:   namespace,
@@ -45,7 +46,7 @@ func NewAttributesRecord(object runtime.Object, kind, namespace, name, resource,
 	}
 }
 
-func (record *attributesRecord) GetKind() string {
+func (record *attributesRecord) GetKind() unversioned.GroupVersionKind {
 	return record.kind
 }
 
@@ -57,7 +58,7 @@ func (record *attributesRecord) GetName() string {
 	return record.name
 }
 
-func (record *attributesRecord) GetResource() string {
+func (record *attributesRecord) GetResource() unversioned.GroupVersionResource {
 	return record.resource
 }
 

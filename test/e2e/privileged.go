@@ -19,13 +19,15 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"net/url"
+	"k8s.io/kubernetes/test/e2e/framework"
 )
 
 const (
@@ -36,31 +38,23 @@ const (
 	notPrivilegedHttpPort      = 9090
 	notPrivilegedUdpPort       = 9091
 	notPrivilegedContainerName = "not-privileged-container"
-	privilegedContainerImage   = "gcr.io/google_containers/netexec:1.1"
+	privilegedContainerImage   = "gcr.io/google_containers/netexec:1.4"
 	privilegedCommand          = "ip link add dummy1 type dummy"
 )
 
 type PrivilegedPodTestConfig struct {
 	privilegedPod *api.Pod
-	f             *Framework
-	nodes         []string
+	f             *framework.Framework
+	hostExecPod   *api.Pod
 }
 
-var _ = Describe("PrivilegedPod", func() {
-	f := NewFramework("e2e-privilegedpod")
+var _ = framework.KubeDescribe("PrivilegedPod", func() {
+	f := framework.NewDefaultFramework("e2e-privilegedpod")
 	config := &PrivilegedPodTestConfig{
 		f: f,
 	}
 	It("should test privileged pod", func() {
-		SkipUnlessProviderIs(providersWithSSH...)
-
-		By("Getting ssh-able hosts")
-		hosts, err := NodeSSHHosts(config.f.Client)
-		Expect(err).NotTo(HaveOccurred())
-		if len(hosts) == 0 {
-			Failf("No ssh-able nodes")
-		}
-		config.nodes = hosts
+		config.hostExecPod = framework.LaunchHostExecPod(config.f.Client, config.f.Namespace.Name, "hostexec")
 
 		By("Creating a privileged pod")
 		config.createPrivilegedPod()
@@ -76,14 +70,14 @@ var _ = Describe("PrivilegedPod", func() {
 func (config *PrivilegedPodTestConfig) runPrivilegedCommandOnPrivilegedContainer() {
 	outputMap := config.dialFromContainer(config.privilegedPod.Status.PodIP, privilegedHttpPort)
 	if len(outputMap["error"]) > 0 {
-		Failf("Privileged command failed unexpectedly on privileged container, output:%v", outputMap)
+		framework.Failf("Privileged command failed unexpectedly on privileged container, output:%v", outputMap)
 	}
 }
 
 func (config *PrivilegedPodTestConfig) runPrivilegedCommandOnNonPrivilegedContainer() {
 	outputMap := config.dialFromContainer(config.privilegedPod.Status.PodIP, notPrivilegedHttpPort)
 	if len(outputMap["error"]) == 0 {
-		Failf("Privileged command should have failed on non-privileged container, output:%v", outputMap)
+		framework.Failf("Privileged command should have failed on non-privileged container, output:%v", outputMap)
 	}
 }
 
@@ -96,12 +90,11 @@ func (config *PrivilegedPodTestConfig) dialFromContainer(containerIP string, con
 		v.Encode())
 
 	By(fmt.Sprintf("Exec-ing into container over http. Running command:%s", cmd))
-	stdout := config.ssh(cmd)
-	Logf("Output is %q", stdout)
+	stdout := framework.RunHostCmdOrDie(config.hostExecPod.Namespace, config.hostExecPod.Name, cmd)
 	var output map[string]string
 	err := json.Unmarshal([]byte(stdout), &output)
 	Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Could not unmarshal curl response: %s", stdout))
-	Logf("Deserialized output is %v", stdout)
+	framework.Logf("Deserialized output is %v", stdout)
 	return output
 }
 
@@ -111,7 +104,7 @@ func (config *PrivilegedPodTestConfig) createPrivilegedPodSpec() *api.Pod {
 	pod := &api.Pod{
 		TypeMeta: unversioned.TypeMeta{
 			Kind:       "Pod",
-			APIVersion: latest.GroupOrDie("").Version,
+			APIVersion: registered.GroupOrDie(api.GroupName).GroupVersion.String(),
 		},
 		ObjectMeta: api.ObjectMeta{
 			Name:      privilegedPodName,
@@ -155,12 +148,12 @@ func (config *PrivilegedPodTestConfig) createPrivilegedPod() {
 func (config *PrivilegedPodTestConfig) createPod(pod *api.Pod) *api.Pod {
 	createdPod, err := config.getPodClient().Create(pod)
 	if err != nil {
-		Failf("Failed to create %q pod: %v", pod.Name, err)
+		framework.Failf("Failed to create %q pod: %v", pod.Name, err)
 	}
-	expectNoError(config.f.WaitForPodRunning(pod.Name))
+	framework.ExpectNoError(config.f.WaitForPodRunning(pod.Name))
 	createdPod, err = config.getPodClient().Get(pod.Name)
 	if err != nil {
-		Failf("Failed to retrieve %q pod: %v", pod.Name, err)
+		framework.Failf("Failed to retrieve %q pod: %v", pod.Name, err)
 	}
 	return createdPod
 }
@@ -171,11 +164,4 @@ func (config *PrivilegedPodTestConfig) getPodClient() client.PodInterface {
 
 func (config *PrivilegedPodTestConfig) getNamespaceClient() client.NamespaceInterface {
 	return config.f.Client.Namespaces()
-}
-
-func (config *PrivilegedPodTestConfig) ssh(cmd string) string {
-	stdout, _, code, err := SSH(cmd, config.nodes[0], testContext.Provider)
-	Expect(err).NotTo(HaveOccurred(), "error while SSH-ing to node: %v (code %v)", err, code)
-	Expect(code).Should(BeZero(), "command exited with non-zero code %v. cmd:%s", code, cmd)
-	return stdout
 }

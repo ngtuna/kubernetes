@@ -48,8 +48,25 @@ type Attributes interface {
 	// The kind of object, if a request is for a REST object.
 	GetResource() string
 
+	// GetSubresource returns the subresource being requested, if present
+	GetSubresource() string
+
+	// GetName returns the name of the object as parsed off the request.  This will not be present for all request types, but
+	// will be present for: get, update, delete
+	GetName() string
+
 	// The group of the resource, if a request is for a REST object.
 	GetAPIGroup() string
+
+	// GetAPIVersion returns the version of the group requested, if a request is for a REST object.
+	GetAPIVersion() string
+
+	// IsResourceRequest returns true for requests to API resources, like /api/v1/nodes,
+	// and false for non-resource endpoints like /api, /healthz, and /swaggerapi
+	IsResourceRequest() bool
+
+	// GetPath returns the path of the request
+	GetPath() string
 }
 
 // Authorizer makes an authorization decision based on information gained by making
@@ -72,11 +89,16 @@ type RequestAttributesGetter interface {
 
 // AttributesRecord implements Attributes interface.
 type AttributesRecord struct {
-	User      user.Info
-	Verb      string
-	Namespace string
-	APIGroup  string
-	Resource  string
+	User            user.Info
+	Verb            string
+	Namespace       string
+	APIGroup        string
+	APIVersion      string
+	Resource        string
+	Subresource     string
+	Name            string
+	ResourceRequest bool
+	Path            string
 }
 
 func (a AttributesRecord) GetUserName() string {
@@ -103,6 +125,26 @@ func (a AttributesRecord) GetResource() string {
 	return a.Resource
 }
 
+func (a AttributesRecord) GetSubresource() string {
+	return a.Subresource
+}
+
+func (a AttributesRecord) GetName() string {
+	return a.Name
+}
+
 func (a AttributesRecord) GetAPIGroup() string {
 	return a.APIGroup
+}
+
+func (a AttributesRecord) GetAPIVersion() string {
+	return a.APIVersion
+}
+
+func (a AttributesRecord) IsResourceRequest() bool {
+	return a.ResourceRequest
+}
+
+func (a AttributesRecord) GetPath() string {
+	return a.Path
 }

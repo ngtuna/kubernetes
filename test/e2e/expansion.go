@@ -19,12 +19,15 @@ package e2e
 import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/test/e2e/framework"
 
 	. "github.com/onsi/ginkgo"
 )
 
-var _ = Describe("Variable Expansion", func() {
-	framework := NewFramework("var-expansion")
+// These tests exercise the Kubernetes expansion syntax $(VAR).
+// For more information, see: docs/design/expansion.md
+var _ = framework.KubeDescribe("Variable Expansion", func() {
+	f := framework.NewDefaultFramework("var-expansion")
 
 	It("should allow composing env vars into new env vars [Conformance]", func() {
 		podName := "var-expansion-" + string(util.NewUUID())
@@ -37,7 +40,7 @@ var _ = Describe("Variable Expansion", func() {
 				Containers: []api.Container{
 					{
 						Name:    "dapi-container",
-						Image:   "gcr.io/google_containers/busybox",
+						Image:   "gcr.io/google_containers/busybox:1.24",
 						Command: []string{"sh", "-c", "env"},
 						Env: []api.EnvVar{
 							{
@@ -59,7 +62,7 @@ var _ = Describe("Variable Expansion", func() {
 			},
 		}
 
-		framework.TestContainerOutput("env composition", pod, 0, []string{
+		f.TestContainerOutput("env composition", pod, 0, []string{
 			"FOO=foo-value",
 			"BAR=bar-value",
 			"FOOBAR=foo-value;;bar-value",
@@ -77,7 +80,7 @@ var _ = Describe("Variable Expansion", func() {
 				Containers: []api.Container{
 					{
 						Name:    "dapi-container",
-						Image:   "gcr.io/google_containers/busybox",
+						Image:   "gcr.io/google_containers/busybox:1.24",
 						Command: []string{"sh", "-c", "TEST_VAR=wrong echo \"$(TEST_VAR)\""},
 						Env: []api.EnvVar{
 							{
@@ -91,7 +94,7 @@ var _ = Describe("Variable Expansion", func() {
 			},
 		}
 
-		framework.TestContainerOutput("substitution in container's command", pod, 0, []string{
+		f.TestContainerOutput("substitution in container's command", pod, 0, []string{
 			"test-value",
 		})
 	})
@@ -107,7 +110,7 @@ var _ = Describe("Variable Expansion", func() {
 				Containers: []api.Container{
 					{
 						Name:    "dapi-container",
-						Image:   "gcr.io/google_containers/busybox",
+						Image:   "gcr.io/google_containers/busybox:1.24",
 						Command: []string{"sh", "-c"},
 						Args:    []string{"TEST_VAR=wrong echo \"$(TEST_VAR)\""},
 						Env: []api.EnvVar{
@@ -122,7 +125,7 @@ var _ = Describe("Variable Expansion", func() {
 			},
 		}
 
-		framework.TestContainerOutput("substitution in container's args", pod, 0, []string{
+		f.TestContainerOutput("substitution in container's args", pod, 0, []string{
 			"test-value",
 		})
 	})

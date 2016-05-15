@@ -50,7 +50,7 @@ function prepare-e2e() {
 function detect-project() {
   echo "... in gke:detect-project()" >&2
   if [[ -z "${PROJECT:-}" ]]; then
-    export PROJECT=$("${GCLOUD}" config list project | tail -n 1 | cut -f 3 -d ' ')
+    export PROJECT=$("${GCLOUD}" config list project --format 'value(core.project)')
     echo "... Using project: ${PROJECT}" >&2
   fi
   if [[ -z "${PROJECT:-}" ]]; then
@@ -98,10 +98,22 @@ function verify-prereqs() {
   if [ ! -w $(dirname `which gcloud`) ]; then
     sudo_prefix="sudo"
   fi
-  ${sudo_prefix} gcloud ${gcloud_prompt:-} components update preview || true
-  ${sudo_prefix} gcloud ${gcloud_prompt:-} components update ${CMD_GROUP:-} || true
-  ${sudo_prefix} gcloud ${gcloud_prompt:-} components update kubectl|| true
+  ${sudo_prefix} gcloud ${gcloud_prompt:-} components install alpha || true
+  ${sudo_prefix} gcloud ${gcloud_prompt:-} components install beta || true
+  ${sudo_prefix} gcloud ${gcloud_prompt:-} components install kubectl|| true
   ${sudo_prefix} gcloud ${gcloud_prompt:-} components update || true
+}
+
+# Validate a kubernetes cluster
+function validate-cluster {
+  # Simply override the NUM_NODES variable if we've spread nodes across multiple
+  # zones before calling into the generic validate-cluster logic.
+  local EXPECTED_NUM_NODES="${NUM_NODES}"
+  for zone in $(echo "${ADDITIONAL_ZONES}" | sed "s/,/ /g")
+  do
+    (( EXPECTED_NUM_NODES += NUM_NODES ))
+  done
+  NUM_NODES=${EXPECTED_NUM_NODES} bash -c "${KUBE_ROOT}/cluster/validate-cluster.sh"
 }
 
 # Instantiate a kubernetes cluster
@@ -111,9 +123,12 @@ function verify-prereqs() {
 #   CLUSTER_NAME
 #   ZONE
 #   CLUSTER_API_VERSION (optional)
-#   NUM_MINIONS
-#   MINION_SCOPES
+#   NUM_NODES
+#   ADDITIONAL_ZONES (optional)
+#   NODE_SCOPES
 #   MACHINE_TYPE
+#   CLUSTER_IP_RANGE (optional)
+#   GKE_CREATE_FLAGS (optional, space delineated)
 function kube-up() {
   echo "... in gke:kube-up()" >&2
   detect-project >&2
@@ -142,12 +157,26 @@ function kube-up() {
   local create_args=(
     "--zone=${ZONE}"
     "--project=${PROJECT}"
-    "--num-nodes=${NUM_MINIONS}"
+    "--num-nodes=${NUM_NODES}"
     "--network=${NETWORK}"
-    "--scopes=${MINION_SCOPES}"
+    "--scopes=${NODE_SCOPES}"
     "--cluster-version=${CLUSTER_API_VERSION}"
     "--machine-type=${MACHINE_TYPE}"
   )
+
+  if [[ ! -z "${ADDITIONAL_ZONES:-}" ]]; then
+    create_args+=("--additional-zones=${ADDITIONAL_ZONES}")
+  fi
+
+  if [[ ! -z "${CLUSTER_IP_RANGE:-}" ]]; then
+    create_args+=("--cluster-ipv4-cidr=${CLUSTER_IP_RANGE}")
+  fi
+
+  if [[ ! -z "${IMAGE_TYPE:-}" ]]; then
+    create_args+=("--image-type=${IMAGE_TYPE}")
+  fi
+
+  create_args+=( ${GKE_CREATE_FLAGS:-} )
 
   # Bring up the cluster.
   "${GCLOUD}" ${CMD_GROUP:-} container clusters create "${CLUSTER_NAME}" "${create_args[@]}"
@@ -162,30 +191,33 @@ function kube-up() {
 #   GCLOUD
 #   ZONE
 # Vars set:
-#   MINION_TAG
+#   NODE_TAG
 function test-setup() {
   echo "... in gke:test-setup()" >&2
   # Detect the project into $PROJECT if it isn't set
   detect-project >&2
-  detect-minions >&2
+
+  "${KUBE_ROOT}/cluster/kube-up.sh"
+
+  detect-nodes >&2
 
   # At this point, CLUSTER_NAME should have been used, so its value is final.
-  MINION_TAG=$($GCLOUD compute instances describe ${MINION_NAMES[0]} --project="${PROJECT}" --zone="${ZONE}" | grep -o "gke-${CLUSTER_NAME}-.\{8\}-node" | head -1)
-  OLD_MINION_TAG="k8s-${CLUSTER_NAME}-node"
+  NODE_TAG=$($GCLOUD compute instances describe ${NODE_NAMES[0]} --project="${PROJECT}" --zone="${ZONE}" --format='value(tags.items)' | grep -o "gke-${CLUSTER_NAME}-.\{8\}-node")
+  OLD_NODE_TAG="k8s-${CLUSTER_NAME}-node"
 
   # Open up port 80 & 8080 so common containers on minions can be reached.
   "${GCLOUD}" compute firewall-rules create \
     "${CLUSTER_NAME}-http-alt" \
     --allow tcp:80,tcp:8080 \
     --project "${PROJECT}" \
-    --target-tags "${MINION_TAG},${OLD_MINION_TAG}" \
+    --target-tags "${NODE_TAG},${OLD_NODE_TAG}" \
     --network="${NETWORK}"
 
   "${GCLOUD}" compute firewall-rules create \
     "${CLUSTER_NAME}-nodeports" \
     --allow tcp:30000-32767,udp:30000-32767 \
     --project "${PROJECT}" \
-    --target-tags "${MINION_TAG},${OLD_MINION_TAG}" \
+    --target-tags "${NODE_TAG},${OLD_NODE_TAG}" \
     --network="${NETWORK}"
 }
 
@@ -201,37 +233,43 @@ function detect-master() {
   echo "... in gke:detect-master()" >&2
   detect-project >&2
   KUBE_MASTER_IP=$("${GCLOUD}" ${CMD_GROUP:-} container clusters describe \
-    --project="${PROJECT}" --zone="${ZONE}" "${CLUSTER_NAME}" \
-    | grep endpoint | cut -f 2 -d ' ')
+    --project="${PROJECT}" --zone="${ZONE}" --format='value(endpoint)' \
+    "${CLUSTER_NAME}")
 }
 
 # Assumed vars:
 #   none
 # Vars set:
-#   MINION_NAMES
-function detect-minions() {
-  echo "... in gke:detect-minions()" >&2
-  detect-minion-names
+#   NODE_NAMES
+function detect-nodes() {
+  echo "... in gke:detect-nodes()" >&2
+  detect-node-names
 }
 
 # Detect minions created in the minion group
 #
+# Note that this will only return the nodes from one of the cluster's instance
+# groups, regardless of how many the cluster has.
+#
 # Assumed vars:
 #   none
 # Vars set:
-#   MINION_NAMES
-function detect-minion-names {
-  echo "... in gke:detect-minion-names()" >&2
+#   NODE_NAMES
+function detect-node-names {
+  echo "... in gke:detect-node-names()" >&2
   detect-project
   detect-node-instance-group
-  MINION_NAMES=($(gcloud compute instance-groups managed list-instances \
+  NODE_NAMES=($(gcloud compute instance-groups managed list-instances \
     "${NODE_INSTANCE_GROUP}" --zone "${ZONE}" --project "${PROJECT}" \
-    --format=yaml | grep instance: | cut -d ' ' -f 2))
+    --format='value(instance)'))
 
-  echo "MINION_NAMES=${MINION_NAMES[*]}"
+  echo "NODE_NAMES=${NODE_NAMES[*]:-}"
 }
 
-# Detect instance group name generated by gke
+# Detect instance group name generated by gke.
+#
+# Note that this will only select instance groups in the same zone as the
+# cluster, meaning that it won't include all groups in a multi-zone cluster.
 #
 # Assumed vars:
 #   GCLOUD
@@ -242,9 +280,10 @@ function detect-minion-names {
 #   NODE_INSTANCE_GROUP
 function detect-node-instance-group {
   echo "... in gke:detect-node-instance-group()" >&2
-  NODE_INSTANCE_GROUP=$("${GCLOUD}" ${CMD_GROUP:-} container clusters describe \
-    --project="${PROJECT}" --zone="${ZONE}" "${CLUSTER_NAME}" \
-    | grep instanceGroupManagers | cut -d '/' -f 11)
+  local url=$("${GCLOUD}" ${CMD_GROUP:-} container clusters describe \
+    --project="${PROJECT}" --zone="${ZONE}" \
+    --format='value(instanceGroupUrls)' "${CLUSTER_NAME}")
+  NODE_INSTANCE_GROUP="${url##*/}"
 }
 
 # SSH to a node by name ($1) and run a command ($2).
@@ -260,30 +299,18 @@ function ssh-to-node() {
   local cmd="$2"
   # Loop until we can successfully ssh into the box
   for try in $(seq 1 5); do
-    if gcloud compute ssh --ssh-flag="-o LogLevel=quiet" --project "${PROJECT}" --zone="${ZONE}" "${node}" --command "echo test > /dev/null"; then
+    if gcloud compute ssh --ssh-flag="-o LogLevel=quiet" --ssh-flag="-o ConnectTimeout=30" --project "${PROJECT}" --zone="${ZONE}" "${node}" --command "echo test > /dev/null"; then
       break
     fi
     sleep 5
   done
   # Then actually try the command.
-  gcloud compute ssh --ssh-flag="-o LogLevel=quiet" --project "${PROJECT}" --zone="${ZONE}" "${node}" --command "${cmd}"
-}
-
-# Restart the kube-proxy on a node ($1)
-function restart-kube-proxy() {
-  echo "... in gke:restart-kube-proxy()"  >&2
-  ssh-to-node "$1" "sudo /etc/init.d/kube-proxy restart"
-}
-
-# Restart the kube-proxy on master ($1)
-function restart-apiserver() {
-  echo "... in gke:restart-apiserver()"  >&2
-  ssh-to-node "$1" "sudo docker ps | grep /kube-apiserver | cut -d ' ' -f 1 | xargs sudo docker kill"
+  gcloud compute ssh --ssh-flag="-o LogLevel=quiet" --ssh-flag="-o ConnectTimeout=30" --project "${PROJECT}" --zone="${ZONE}" "${node}" --command "${cmd}"
 }
 
 # Execute after running tests to perform any required clean-up.  This is called
-# from hack/e2e-test.sh. This calls kube-down, so the cluster still exists when
-# this is called.
+# from hack/e2e.go. This calls kube-down, so the cluster still exists when this
+# is called.
 #
 # Assumed vars:
 #   CLUSTER_NAME

@@ -23,14 +23,14 @@ import (
 	"sync"
 
 	"github.com/golang/glog"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 )
 
 // Factory is a function that returns an Interface for admission decisions.
 // The config parameter provides an io.Reader handler to the factory in
 // order to load specific configurations. If no configuration is provided
 // the parameter is nil.
-type Factory func(client client.Interface, config io.Reader) (Interface, error)
+type Factory func(client clientset.Interface, config io.Reader) (Interface, error)
 
 // All registered admission options.
 var (
@@ -63,22 +63,23 @@ func RegisterPlugin(name string, plugin Factory) {
 	plugins[name] = plugin
 }
 
-// GetPlugin creates an instance of the named plugin, or nil if the name is not
-// known. The error is returned only when the named provider was known but failed
-// to initialize. The config parameter specifies the io.Reader handler of the
-// configuration file for the cloud provider, or nil for no configuration.
-func GetPlugin(name string, client client.Interface, config io.Reader) (Interface, error) {
+// getPlugin creates an instance of the named plugin.  It returns `false` if the
+// the name is not known. The error is returned only when the named provider was
+// known but failed to initialize.  The config parameter specifies the io.Reader
+// handler of the configuration file for the cloud provider, or nil for no configuration.
+func getPlugin(name string, client clientset.Interface, config io.Reader) (Interface, bool, error) {
 	pluginsMutex.Lock()
 	defer pluginsMutex.Unlock()
 	f, found := plugins[name]
 	if !found {
-		return nil, nil
+		return nil, false, nil
 	}
-	return f(client, config)
+	ret, err := f(client, config)
+	return ret, true, err
 }
 
 // InitPlugin creates an instance of the named interface.
-func InitPlugin(name string, client client.Interface, configFilePath string) Interface {
+func InitPlugin(name string, client clientset.Interface, configFilePath string) Interface {
 	var (
 		config *os.File
 		err    error
@@ -99,11 +100,11 @@ func InitPlugin(name string, client client.Interface, configFilePath string) Int
 		defer config.Close()
 	}
 
-	plugin, err := GetPlugin(name, client, config)
+	plugin, found, err := getPlugin(name, client, config)
 	if err != nil {
 		glog.Fatalf("Couldn't init admission plugin %q: %v", name, err)
 	}
-	if plugin == nil {
+	if !found {
 		glog.Fatalf("Unknown admission plugin: %s", name)
 	}
 

@@ -28,6 +28,7 @@ import (
 	"k8s.io/kubernetes/pkg/controller/framework"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/util/wait"
 
 	"github.com/google/gofuzz"
 )
@@ -223,7 +224,9 @@ func TestHammerController(t *testing.T) {
 	go controller.Run(stop)
 
 	// Let's wait for the controller to do its initial sync
-	time.Sleep(100 * time.Millisecond)
+	wait.Poll(100*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {
+		return controller.HasSynced(), nil
+	})
 	if !controller.HasSynced() {
 		t.Errorf("Expected HasSynced() to return true after the initial sync")
 	}
@@ -276,6 +279,7 @@ func TestHammerController(t *testing.T) {
 	wg.Wait()
 
 	// Let's wait for the controller to finish processing the things we just added.
+	// TODO: look in the queue to see how many items need to be processed.
 	time.Sleep(100 * time.Millisecond)
 	close(stop)
 
@@ -311,35 +315,42 @@ func TestUpdate(t *testing.T) {
 		pair{FROM, FROM}: true,
 	}
 
-	pod := func(name, check string) *api.Pod {
-		return &api.Pod{
+	pod := func(name, check string, final bool) *api.Pod {
+		p := &api.Pod{
 			ObjectMeta: api.ObjectMeta{
 				Name:   name,
 				Labels: map[string]string{"check": check},
 			},
 		}
+		if final {
+			p.Labels["final"] = "true"
+		}
+		return p
+	}
+	deletePod := func(p *api.Pod) bool {
+		return p.Labels["final"] == "true"
 	}
 
 	tests := []func(string){
 		func(name string) {
 			name = "a-" + name
-			source.Add(pod(name, FROM))
-			source.Modify(pod(name, TO))
+			source.Add(pod(name, FROM, false))
+			source.Modify(pod(name, TO, true))
 		},
 		func(name string) {
 			name = "b-" + name
-			source.Add(pod(name, FROM))
-			source.ModifyDropWatch(pod(name, TO))
+			source.Add(pod(name, FROM, false))
+			source.ModifyDropWatch(pod(name, TO, true))
 		},
 		func(name string) {
 			name = "c-" + name
-			source.AddDropWatch(pod(name, FROM))
-			source.Modify(pod(name, ADD_MISSED))
-			source.Modify(pod(name, TO))
+			source.AddDropWatch(pod(name, FROM, false))
+			source.Modify(pod(name, ADD_MISSED, false))
+			source.Modify(pod(name, TO, true))
 		},
 		func(name string) {
 			name = "d-" + name
-			source.Add(pod(name, FROM))
+			source.Add(pod(name, FROM, true))
 		},
 	}
 
@@ -362,7 +373,9 @@ func TestUpdate(t *testing.T) {
 				if !allowedTransitions[pair{from, to}] {
 					t.Errorf("observed transition %q -> %q for %v", from, to, n.Name)
 				}
-				source.Delete(n)
+				if deletePod(n) {
+					source.Delete(n)
+				}
 			},
 			DeleteFunc: func(obj interface{}) {
 				testDoneWG.Done()

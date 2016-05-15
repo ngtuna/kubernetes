@@ -23,14 +23,15 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/client/cache"
-	"k8s.io/kubernetes/pkg/client/record"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/framework"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/metrics"
+	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
+	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/watch"
 
 	"github.com/golang/glog"
@@ -41,47 +42,52 @@ const (
 )
 
 type GCController struct {
-	kubeClient     client.Interface
+	kubeClient     clientset.Interface
 	podStore       cache.StoreToPodLister
 	podStoreSyncer *framework.Controller
 	deletePod      func(namespace, name string) error
 	threshold      int
 }
 
-func New(kubeClient client.Interface, resyncPeriod controller.ResyncPeriodFunc, threshold int) *GCController {
-	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartLogging(glog.Infof)
-	eventBroadcaster.StartRecordingToSink(kubeClient.Events(""))
-
+func New(kubeClient clientset.Interface, resyncPeriod controller.ResyncPeriodFunc, threshold int) *GCController {
+	if kubeClient != nil && kubeClient.Core().GetRESTClient().GetRateLimiter() != nil {
+		metrics.RegisterMetricAndTrackRateLimiterUsage("gc_controller", kubeClient.Core().GetRESTClient().GetRateLimiter())
+	}
 	gcc := &GCController{
 		kubeClient: kubeClient,
 		threshold:  threshold,
 		deletePod: func(namespace, name string) error {
-			return kubeClient.Pods(namespace).Delete(name, api.NewDeleteOptions(0))
+			return kubeClient.Core().Pods(namespace).Delete(name, api.NewDeleteOptions(0))
 		},
 	}
 
-	terminatedSelector := compileTerminatedPodSelector()
+	terminatedSelector := fields.ParseSelectorOrDie("status.phase!=" + string(api.PodPending) + ",status.phase!=" + string(api.PodRunning) + ",status.phase!=" + string(api.PodUnknown))
 
-	gcc.podStore.Store, gcc.podStoreSyncer = framework.NewInformer(
+	gcc.podStore.Indexer, gcc.podStoreSyncer = framework.NewIndexerInformer(
 		&cache.ListWatch{
-			ListFunc: func() (runtime.Object, error) {
-				return gcc.kubeClient.Pods(api.NamespaceAll).List(labels.Everything(), terminatedSelector)
+			ListFunc: func(options api.ListOptions) (runtime.Object, error) {
+				options.FieldSelector = terminatedSelector
+				return gcc.kubeClient.Core().Pods(api.NamespaceAll).List(options)
 			},
 			WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
-				return gcc.kubeClient.Pods(api.NamespaceAll).Watch(labels.Everything(), terminatedSelector, options)
+				options.FieldSelector = terminatedSelector
+				return gcc.kubeClient.Core().Pods(api.NamespaceAll).Watch(options)
 			},
 		},
 		&api.Pod{},
 		resyncPeriod(),
 		framework.ResourceEventHandlerFuncs{},
+		// We don't need to build a index for podStore here actually, but build one for consistency.
+		// It will ensure that if people start making use of the podStore in more specific ways,
+		// they'll get the benefits they expect. It will also reserve the name for future refactorings.
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
 	)
 	return gcc
 }
 
 func (gcc *GCController) Run(stop <-chan struct{}) {
 	go gcc.podStoreSyncer.Run(stop)
-	go util.Until(gcc.gc, gcCheckPeriod, stop)
+	go wait.Until(gcc.gc, gcCheckPeriod, stop)
 	<-stop
 }
 
@@ -106,19 +112,11 @@ func (gcc *GCController) gc() {
 			defer wait.Done()
 			if err := gcc.deletePod(namespace, name); err != nil {
 				// ignore not founds
-				defer util.HandleError(err)
+				defer utilruntime.HandleError(err)
 			}
 		}(terminatedPods[i].Namespace, terminatedPods[i].Name)
 	}
 	wait.Wait()
-}
-
-func compileTerminatedPodSelector() fields.Selector {
-	selector, err := fields.ParseSelector("status.phase!=" + string(api.PodPending) + ",status.phase!=" + string(api.PodRunning) + ",status.phase!=" + string(api.PodUnknown))
-	if err != nil {
-		panic("terminatedSelector must compile: " + err.Error())
-	}
-	return selector
 }
 
 // byCreationTimestamp sorts a list by creation timestamp, using their names as a tie breaker.

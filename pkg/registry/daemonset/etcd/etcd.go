@@ -21,37 +21,40 @@ import (
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/registry/cachesize"
 	"k8s.io/kubernetes/pkg/registry/daemonset"
 	"k8s.io/kubernetes/pkg/registry/generic"
-	etcdgeneric "k8s.io/kubernetes/pkg/registry/generic/etcd"
+	"k8s.io/kubernetes/pkg/registry/generic/registry"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/storage"
 )
 
 // rest implements a RESTStorage for DaemonSets against etcd
 type REST struct {
-	*etcdgeneric.Etcd
+	*registry.Store
 }
 
-// daemonPrefix is the location for daemons in etcd
-var daemonPrefix = "/daemonsets"
-
 // NewREST returns a RESTStorage object that will work against DaemonSets.
-func NewREST(s storage.Interface) (*REST, *StatusREST) {
-	store := &etcdgeneric.Etcd{
+func NewREST(opts generic.RESTOptions) (*REST, *StatusREST) {
+	prefix := "/daemonsets"
+
+	newListFunc := func() runtime.Object { return &extensions.DaemonSetList{} }
+	storageInterface := opts.Decorator(
+		opts.Storage, cachesize.GetWatchCacheSizeByResource(cachesize.Daemonsets), &extensions.DaemonSet{}, prefix, daemonset.Strategy, newListFunc)
+
+	store := &registry.Store{
 		NewFunc: func() runtime.Object { return &extensions.DaemonSet{} },
 
 		// NewListFunc returns an object capable of storing results of an etcd list.
-		NewListFunc: func() runtime.Object { return &extensions.DaemonSetList{} },
+		NewListFunc: newListFunc,
 		// Produces a path that etcd understands, to the root of the resource
 		// by combining the namespace in the context with the given prefix
 		KeyRootFunc: func(ctx api.Context) string {
-			return etcdgeneric.NamespaceKeyRootFunc(ctx, daemonPrefix)
+			return registry.NamespaceKeyRootFunc(ctx, prefix)
 		},
 		// Produces a path that etcd understands, to the resource by combining
 		// the namespace in the context with the given prefix
 		KeyFunc: func(ctx api.Context, name string) (string, error) {
-			return etcdgeneric.NamespaceKeyFunc(ctx, daemonPrefix, name)
+			return registry.NamespaceKeyFunc(ctx, prefix, name)
 		},
 		// Retrieve the name field of a daemon set
 		ObjectNameFunc: func(obj runtime.Object) (string, error) {
@@ -61,15 +64,17 @@ func NewREST(s storage.Interface) (*REST, *StatusREST) {
 		PredicateFunc: func(label labels.Selector, field fields.Selector) generic.Matcher {
 			return daemonset.MatchDaemonSet(label, field)
 		},
-		EndpointName: "daemonsets",
+		QualifiedResource:       extensions.Resource("daemonsets"),
+		DeleteCollectionWorkers: opts.DeleteCollectionWorkers,
 
 		// Used to validate daemon set creation
 		CreateStrategy: daemonset.Strategy,
 
 		// Used to validate daemon set updates
 		UpdateStrategy: daemonset.Strategy,
+		DeleteStrategy: daemonset.Strategy,
 
-		Storage: s,
+		Storage: storageInterface,
 	}
 	statusStore := *store
 	statusStore.UpdateStrategy = daemonset.StatusStrategy
@@ -79,7 +84,7 @@ func NewREST(s storage.Interface) (*REST, *StatusREST) {
 
 // StatusREST implements the REST endpoint for changing the status of a daemonset
 type StatusREST struct {
-	store *etcdgeneric.Etcd
+	store *registry.Store
 }
 
 func (r *StatusREST) New() runtime.Object {

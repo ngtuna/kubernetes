@@ -23,18 +23,17 @@ import (
 	"k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/rest"
 	"k8s.io/kubernetes/pkg/api/validation"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	etcdgeneric "k8s.io/kubernetes/pkg/registry/generic/etcd"
+	"k8s.io/kubernetes/pkg/kubelet/client"
+	"k8s.io/kubernetes/pkg/registry/generic/registry"
 	genericrest "k8s.io/kubernetes/pkg/registry/generic/rest"
 	"k8s.io/kubernetes/pkg/registry/pod"
 	"k8s.io/kubernetes/pkg/runtime"
 )
 
 // LogREST implements the log endpoint for a Pod
-// TODO: move me into pod/rest - I'm generic to store type via ResourceGetter
 type LogREST struct {
-	Store       *etcdgeneric.Etcd
 	KubeletConn client.ConnectionInfoGetter
+	Store       *registry.Store
 }
 
 // LogREST implements GetterWithOptions
@@ -50,10 +49,10 @@ func (r *LogREST) New() runtime.Object {
 func (r *LogREST) Get(ctx api.Context, name string, opts runtime.Object) (runtime.Object, error) {
 	logOpts, ok := opts.(*api.PodLogOptions)
 	if !ok {
-		return nil, fmt.Errorf("Invalid options object: %#v", opts)
+		return nil, fmt.Errorf("invalid options object: %#v", opts)
 	}
 	if errs := validation.ValidatePodLogOptions(logOpts); len(errs) > 0 {
-		return nil, errors.NewInvalid("podlogs", name, errs)
+		return nil, errors.NewInvalid(api.Kind("PodLogOptions"), name, errs)
 	}
 	location, transport, err := pod.LogLocation(r.Store, r.KubeletConn, ctx, name, logOpts)
 	if err != nil {
@@ -64,7 +63,7 @@ func (r *LogREST) Get(ctx api.Context, name string, opts runtime.Object) (runtim
 		Transport:       transport,
 		ContentType:     "text/plain",
 		Flush:           logOpts.Follow,
-		ResponseChecker: genericrest.NewGenericHttpResponseChecker("Pod", name),
+		ResponseChecker: genericrest.NewGenericHttpResponseChecker(api.Resource("pods/log"), name),
 	}, nil
 }
 
