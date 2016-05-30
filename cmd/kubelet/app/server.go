@@ -19,7 +19,9 @@ package app
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/http"
@@ -190,6 +192,7 @@ func UnsecuredKubeletConfig(s *options.KubeletServer) (*KubeletConfig, error) {
 	}
 	evictionConfig := eviction.Config{
 		PressureTransitionPeriod: s.EvictionPressureTransitionPeriod.Duration,
+		MaxPodGracePeriodSeconds: int64(s.EvictionMaxPodGracePeriod),
 		Thresholds:               thresholds,
 	}
 
@@ -258,6 +261,7 @@ func UnsecuredKubeletConfig(s *options.KubeletServer) (*KubeletConfig, error) {
 		RktAPIEndpoint:                 s.RktAPIEndpoint,
 		RktStage1Image:                 s.RktStage1Image,
 		RootDirectory:                  s.RootDirectory,
+		SeccompProfileRoot:             s.SeccompProfileRoot,
 		Runonce:                        s.RunOnce,
 		SerializeImagePulls:            s.SerializeImagePulls,
 		StandaloneMode:                 (len(s.APIServerList) == 0),
@@ -273,6 +277,7 @@ func UnsecuredKubeletConfig(s *options.KubeletServer) (*KubeletConfig, error) {
 		ExperimentalFlannelOverlay:     s.ExperimentalFlannelOverlay,
 		NodeIP:         net.ParseIP(s.NodeIP),
 		EvictionConfig: evictionConfig,
+		PodsPerCore:    int(s.PodsPerCore),
 	}, nil
 }
 
@@ -289,10 +294,21 @@ func Run(s *options.KubeletServer, kcfg *KubeletConfig) error {
 }
 
 func run(s *options.KubeletServer, kcfg *KubeletConfig) (err error) {
+	if s.ExitOnLockContention && s.LockFilePath == "" {
+		return errors.New("cannot exit on lock file contention: no lock file specified")
+	}
+
+	done := make(chan struct{})
 	if s.LockFilePath != "" {
 		glog.Infof("aquiring lock on %q", s.LockFilePath)
 		if err := flock.Acquire(s.LockFilePath); err != nil {
 			return fmt.Errorf("unable to aquire file lock on %q: %v", s.LockFilePath, err)
+		}
+		if s.ExitOnLockContention {
+			glog.Infof("watching for inotify events for: %v", s.LockFilePath)
+			if err := watchForLockfileContention(s.LockFilePath, done); err != nil {
+				return err
+			}
 		}
 	}
 	if c, err := configz.New("componentconfig"); err == nil {
@@ -330,7 +346,7 @@ func run(s *options.KubeletServer, kcfg *KubeletConfig) (err error) {
 	}
 
 	if kcfg.CAdvisorInterface == nil {
-		kcfg.CAdvisorInterface, err = cadvisor.New(s.CAdvisorPort)
+		kcfg.CAdvisorInterface, err = cadvisor.New(s.CAdvisorPort, kcfg.ContainerRuntime)
 		if err != nil {
 			return err
 		}
@@ -383,8 +399,8 @@ func run(s *options.KubeletServer, kcfg *KubeletConfig) (err error) {
 		return nil
 	}
 
-	// run forever
-	select {}
+	<-done
+	return nil
 }
 
 // InitializeTLS checks for a configured TLSCertFile and TLSPrivateKeyFile: if unspecified a new self-signed
@@ -400,8 +416,10 @@ func InitializeTLS(s *options.KubeletServer) (*server.TLSOptions, error) {
 	}
 	tlsOptions := &server.TLSOptions{
 		Config: &tls.Config{
-			// Change default from SSLv3 to TLSv1.0 (because of POODLE vulnerability).
-			MinVersion: tls.VersionTLS10,
+			// Can't use SSLv3 because of POODLE and BEAST
+			// Can't use TLSv1.0 because of POODLE and BEAST using CBC cipher
+			// Can't use TLSv1.1 because of RC4 cipher usage
+			MinVersion: tls.VersionTLS12,
 			// Populate PeerCertificates in requests, but don't yet reject connections without certificates.
 			ClientAuth: tls.RequestClientCert,
 		},
@@ -518,7 +536,7 @@ func SimpleKubelet(client *clientset.Clientset,
 	cloud cloudprovider.Interface,
 	osInterface kubecontainer.OSInterface,
 	fileCheckFrequency, httpCheckFrequency, minimumGCAge, nodeStatusUpdateFrequency, syncFrequency, outOfDiskTransitionFrequency, evictionPressureTransitionPeriod time.Duration,
-	maxPods int,
+	maxPods int, podsPerCore int,
 	containerManager cm.ContainerManager, clusterDNS net.IP) *KubeletConfig {
 	imageGCPolicy := kubelet.ImageGCPolicy{
 		HighThresholdPercent: 90,
@@ -589,6 +607,7 @@ func SimpleKubelet(client *clientset.Clientset,
 		Writer:              &io.StdWriter{},
 		OutOfDiskTransitionFrequency: outOfDiskTransitionFrequency,
 		EvictionConfig:               evictionConfig,
+		PodsPerCore:                  podsPerCore,
 	}
 	return &kcfg
 }
@@ -654,6 +673,42 @@ func RunKubelet(kcfg *KubeletConfig) error {
 	}
 
 	util.ApplyRLimitForSelf(kcfg.MaxOpenFiles)
+
+	// TODO(dawnchen): remove this once we deprecated old debian containervm images.
+	// This is a workaround for issue: https://github.com/opencontainers/runc/issues/726
+	// The current chosen number is consistent with most of other os dist.
+	const maxkeysPath = "/proc/sys/kernel/keys/root_maxkeys"
+	const minKeys uint64 = 1000000
+	key, err := ioutil.ReadFile(maxkeysPath)
+	if err != nil {
+		glog.Errorf("Cannot read keys quota in %s", maxkeysPath)
+	} else {
+		fields := strings.Fields(string(key))
+		nkey, _ := strconv.ParseUint(fields[0], 10, 64)
+		if nkey < minKeys {
+			glog.Infof("Setting keys quota in %s to %d", maxkeysPath, minKeys)
+			err = ioutil.WriteFile(maxkeysPath, []byte(fmt.Sprintf("%d", uint64(minKeys))), 0644)
+			if err != nil {
+				glog.Warningf("Failed to update %s: %v", maxkeysPath, err)
+			}
+		}
+	}
+	const maxbytesPath = "/proc/sys/kernel/keys/root_maxbytes"
+	const minBytes uint64 = 25000000
+	bytes, err := ioutil.ReadFile(maxbytesPath)
+	if err != nil {
+		glog.Errorf("Cannot read keys bytes in %s", maxbytesPath)
+	} else {
+		fields := strings.Fields(string(bytes))
+		nbyte, _ := strconv.ParseUint(fields[0], 10, 64)
+		if nbyte < minBytes {
+			glog.Infof("Setting keys bytes in %s to %d", maxbytesPath, minBytes)
+			err = ioutil.WriteFile(maxbytesPath, []byte(fmt.Sprintf("%d", uint64(minBytes))), 0644)
+			if err != nil {
+				glog.Warningf("Failed to update %s: %v", maxbytesPath, err)
+			}
+		}
+	}
 
 	// process pods and exit.
 	if kcfg.Runonce {
@@ -763,6 +818,7 @@ type KubeletConfig struct {
 	OOMAdjuster                    *oom.OOMAdjuster
 	OSInterface                    kubecontainer.OSInterface
 	PodCIDR                        string
+	PodsPerCore                    int
 	ReconcileCIDR                  bool
 	PodConfig                      *config.PodConfig
 	PodInfraContainerImage         string
@@ -781,6 +837,7 @@ type KubeletConfig struct {
 	RktStage1Image                 string
 	RootDirectory                  string
 	Runonce                        bool
+	SeccompProfileRoot             string
 	SerializeImagePulls            bool
 	StandaloneMode                 bool
 	StreamingConnectionIdleTimeout time.Duration
@@ -832,6 +889,7 @@ func CreateAndInitKubelet(kc *KubeletConfig) (k KubeletBootstrap, pc *config.Pod
 		kc.DockerClient,
 		kubeClient,
 		kc.RootDirectory,
+		kc.SeccompProfileRoot,
 		kc.PodInfraContainerImage,
 		kc.SyncFrequency,
 		float32(kc.RegistryPullQPS),
@@ -870,6 +928,7 @@ func CreateAndInitKubelet(kc *KubeletConfig) (k KubeletBootstrap, pc *config.Pod
 		kc.PodCIDR,
 		kc.ReconcileCIDR,
 		kc.MaxPods,
+		kc.PodsPerCore,
 		kc.NvidiaGPUs,
 		kc.DockerExecHandler,
 		kc.ResolverConfig,
@@ -927,10 +986,10 @@ func parseResourceList(m utilconfig.ConfigurationMap) (api.ResourceList, error) 
 			if err != nil {
 				return nil, err
 			}
-			if q.Amount.Sign() == -1 {
+			if q.Sign() == -1 {
 				return nil, fmt.Errorf("resource quantity for %q cannot be negative: %v", k, v)
 			}
-			rl[api.ResourceName(k)] = *q
+			rl[api.ResourceName(k)] = q
 		default:
 			return nil, fmt.Errorf("cannot reserve %q resource", k)
 		}

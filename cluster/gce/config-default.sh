@@ -35,11 +35,20 @@ PREEMPTIBLE_NODE=${PREEMPTIBLE_NODE:-false}
 PREEMPTIBLE_MASTER=${PREEMPTIBLE_MASTER:-false}
 
 
-OS_DISTRIBUTION=${KUBE_OS_DISTRIBUTION:-debian}
-MASTER_IMAGE=${KUBE_GCE_MASTER_IMAGE:-container-vm-v20160321}
+# Today the cluster startup scripts asssume the master and the nodes use the
+# same OS distro, thus same set of initialization instructions (e.g., metadata,
+# startup scripts, etc.). The current workaround is the hack in util.sh that
+# reloads <os_distro>/helper.sh in the gap between when the master is created
+# and when the nodes are created.
+# TODO(#26183): Provide a way to differentiate master OS distro and node OS
+# distro.
+OS_DISTRIBUTION=${KUBE_OS_DISTRIBUTION:-gci}
+# For GCI, leaving it blank will auto-select the latest GCI image on the `dev`
+# channel.
+MASTER_IMAGE=${KUBE_GCE_MASTER_IMAGE:-}
 MASTER_IMAGE_PROJECT=${KUBE_GCE_MASTER_PROJECT:-google-containers}
-NODE_IMAGE=${KUBE_GCE_NODE_IMAGE:-"${MASTER_IMAGE}"}
-NODE_IMAGE_PROJECT=${KUBE_GCE_NODE_PROJECT:-"${MASTER_IMAGE_PROJECT}"}
+NODE_IMAGE=${KUBE_GCE_NODE_IMAGE:-container-v1-3-v20160517}
+NODE_IMAGE_PROJECT=${KUBE_GCE_NODE_PROJECT:-google-containers}
 CONTAINER_RUNTIME=${KUBE_CONTAINER_RUNTIME:-docker}
 RKT_VERSION=${KUBE_RKT_VERSION:-0.5.5}
 
@@ -56,8 +65,6 @@ NODE_SCOPES="${NODE_SCOPES:-compute-rw,monitoring,logging-write,storage-ro}"
 # Extra docker options for nodes.
 EXTRA_DOCKER_OPTS="${EXTRA_DOCKER_OPTS:-}"
 
-# Increase the sleep interval value if concerned about API rate limits. 3, in seconds, is the default.
-POLL_SLEEP_INTERVAL="${POLL_SLEEP_INTERVAL:-3}"
 SERVICE_CLUSTER_IP_RANGE="${SERVICE_CLUSTER_IP_RANGE:-10.0.0.0/16}"  # formerly PORTAL_NET
 ALLOCATE_NODE_CIDRS=true
 
@@ -104,11 +111,14 @@ CLUSTER_REGISTRY_DISK_TYPE_GCE="${CLUSTER_REGISTRY_DISK_TYPE_GCE:-pd-standard}"
 # Optional: Install Kubernetes UI
 ENABLE_CLUSTER_UI="${KUBE_ENABLE_CLUSTER_UI:-true}"
 
+# Optional: Install node problem detector.
+ENABLE_NODE_PROBLEM_DETECTOR="${KUBE_ENABLE_NODE_PROBLEM_DETECTOR:-false}"
+
 # Optional: Create autoscaler for cluster's nodes.
 ENABLE_NODE_AUTOSCALER="${KUBE_ENABLE_NODE_AUTOSCALER:-false}"
 if [[ "${ENABLE_NODE_AUTOSCALER}" == "true" ]]; then
-  AUTOSCALER_MIN_NODES="${KUBE_AUTOSCALER_MIN_NODES:-1}"
-  AUTOSCALER_MAX_NODES="${KUBE_AUTOSCALER_MAX_NODES:-${NUM_NODES}}"
+  AUTOSCALER_MIN_NODES="${KUBE_AUTOSCALER_MIN_NODES:-}"
+  AUTOSCALER_MAX_NODES="${KUBE_AUTOSCALER_MAX_NODES:-}"
 fi
 
 # Admission Controllers to invoke prior to persisting objects in cluster
@@ -119,13 +129,12 @@ ADMISSION_CONTROL=NamespaceLifecycle,LimitRanger,ServiceAccount,PersistentVolume
 KUBE_UP_AUTOMATIC_CLEANUP=${KUBE_UP_AUTOMATIC_CLEANUP:-false}
 
 # Networking plugin specific settings.
-NETWORK_PROVIDER="${NETWORK_PROVIDER:-none}" # opencontrail, flannel, kubenet
+NETWORK_PROVIDER="${NETWORK_PROVIDER:-kubenet}" # none, opencontrail, flannel, kubenet
 OPENCONTRAIL_TAG="${OPENCONTRAIL_TAG:-R2.20}"
 OPENCONTRAIL_KUBERNETES_TAG="${OPENCONTRAIL_KUBERNETES_TAG:-master}"
 OPENCONTRAIL_PUBLIC_SUBNET="${OPENCONTRAIL_PUBLIC_SUBNET:-10.1.0.0/16}"
 
 # How should the kubelet configure hairpin mode?
 HAIRPIN_MODE="${HAIRPIN_MODE:-promiscuous-bridge}" # promiscuous-bridge, hairpin-veth, none
-
 # Optional: if set to true, kube-up will configure the cluster to run e2e tests.
 E2E_STORAGE_TEST_ENVIRONMENT=${KUBE_E2E_STORAGE_TEST_ENVIRONMENT:-false}

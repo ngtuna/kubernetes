@@ -53,7 +53,7 @@ const (
 	testPort                  = 9376
 )
 
-func resizeGroup(size int32) error {
+func ResizeGroup(size int32) error {
 	if framework.TestContext.ReportDir != "" {
 		framework.CoreDump(framework.TestContext.ReportDir)
 		defer framework.CoreDump(framework.TestContext.ReportDir)
@@ -346,12 +346,14 @@ var _ = framework.KubeDescribe("Nodes [Disruptive]", func() {
 	var systemPodsNo int32
 	var c *client.Client
 	var ns string
+	ignoreLabels := framework.ImagePullerLabels
 	BeforeEach(func() {
 		c = f.Client
 		ns = f.Namespace.Name
-		systemPods, err := c.Pods(api.NamespaceSystem).List(api.ListOptions{})
+		systemPods, err := framework.GetPodsInNamespace(c, ns, ignoreLabels)
 		Expect(err).NotTo(HaveOccurred())
-		systemPodsNo = int32(len(systemPods.Items))
+		systemPodsNo = int32(len(systemPods))
+
 	})
 
 	// Slow issue #13323 (8 min)
@@ -371,7 +373,7 @@ var _ = framework.KubeDescribe("Nodes [Disruptive]", func() {
 			}
 
 			By("restoring the original node instance group size")
-			if err := resizeGroup(int32(framework.TestContext.CloudConfig.NumNodes)); err != nil {
+			if err := ResizeGroup(int32(framework.TestContext.CloudConfig.NumNodes)); err != nil {
 				framework.Failf("Couldn't restore the original node instance group size: %v", err)
 			}
 			// In GKE, our current tunneling setup has the potential to hold on to a broken tunnel (from a
@@ -396,7 +398,7 @@ var _ = framework.KubeDescribe("Nodes [Disruptive]", func() {
 			// the cluster is restored to health.
 			By("waiting for system pods to successfully restart")
 
-			err := framework.WaitForPodsRunningReady(api.NamespaceSystem, systemPodsNo, framework.PodReadyBeforeTimeout)
+			err := framework.WaitForPodsRunningReady(api.NamespaceSystem, systemPodsNo, framework.PodReadyBeforeTimeout, ignoreLabels)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -410,7 +412,7 @@ var _ = framework.KubeDescribe("Nodes [Disruptive]", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			By(fmt.Sprintf("decreasing cluster size to %d", replicas-1))
-			err = resizeGroup(replicas - 1)
+			err = ResizeGroup(replicas - 1)
 			Expect(err).NotTo(HaveOccurred())
 			err = waitForGroupSize(replicas - 1)
 			Expect(err).NotTo(HaveOccurred())
@@ -434,7 +436,7 @@ var _ = framework.KubeDescribe("Nodes [Disruptive]", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			By(fmt.Sprintf("increasing cluster size to %d", replicas+1))
-			err = resizeGroup(replicas + 1)
+			err = ResizeGroup(replicas + 1)
 			Expect(err).NotTo(HaveOccurred())
 			err = waitForGroupSize(replicas + 1)
 			Expect(err).NotTo(HaveOccurred())

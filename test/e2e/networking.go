@@ -111,8 +111,7 @@ var _ = framework.KubeDescribe("Networking", func() {
 
 		By("Creating a webserver (pending) pod on each node")
 
-		nodes, err := framework.GetReadyNodes(f)
-		framework.ExpectNoError(err)
+		nodes := framework.GetReadySchedulableNodesOrDie(f.Client)
 
 		if len(nodes.Items) == 1 {
 			// in general, the test requires two nodes. But for local development, often a one node cluster
@@ -125,7 +124,7 @@ var _ = framework.KubeDescribe("Networking", func() {
 				"Rerun it with at least two nodes to get complete coverage.")
 		}
 
-		podNames := LaunchNetTestPodPerNode(f, nodes, svcname, "1.8")
+		podNames := LaunchNetTestPodPerNode(f, nodes, svcname)
 
 		// Clean up the pods
 		defer func() {
@@ -220,8 +219,7 @@ var _ = framework.KubeDescribe("Networking", func() {
 		It("should function for pod communication on a single node", func() {
 
 			By("Picking a node")
-			nodes, err := framework.GetReadyNodes(f)
-			framework.ExpectNoError(err)
+			nodes := framework.GetReadySchedulableNodesOrDie(f.Client)
 			node := nodes.Items[0]
 
 			By("Creating a webserver pod")
@@ -238,8 +236,7 @@ var _ = framework.KubeDescribe("Networking", func() {
 			podClient := f.Client.Pods(f.Namespace.Name)
 
 			By("Picking multiple nodes")
-			nodes, err := framework.GetReadyNodes(f)
-			framework.ExpectNoError(err)
+			nodes := framework.GetReadySchedulableNodesOrDie(f.Client)
 
 			if len(nodes.Items) == 1 {
 				framework.Skipf("The test requires two Ready nodes on %s, but found just one.", framework.TestContext.Provider)
@@ -259,7 +256,7 @@ var _ = framework.KubeDescribe("Networking", func() {
 	})
 })
 
-func LaunchNetTestPodPerNode(f *framework.Framework, nodes *api.NodeList, name, version string) []string {
+func LaunchNetTestPodPerNode(f *framework.Framework, nodes *api.NodeList, name string) []string {
 	podNames := []string{}
 
 	totalPods := len(nodes.Items)
@@ -278,7 +275,7 @@ func LaunchNetTestPodPerNode(f *framework.Framework, nodes *api.NodeList, name, 
 				Containers: []api.Container{
 					{
 						Name:  "webserver",
-						Image: "gcr.io/google_containers/nettest:" + version,
+						Image: "gcr.io/google_containers/nettest:1.8",
 						Args: []string{
 							"-service=" + name,
 							//peers >= totalPods should be asserted by the container.

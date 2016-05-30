@@ -19,6 +19,7 @@ package e2e
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
@@ -154,6 +155,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 	var totalPodCapacity int64
 	var RCName string
 	var ns string
+	ignoreLabels := framework.ImagePullerLabels
 
 	AfterEach(func() {
 		rc, err := c.ReplicationControllers(ns).Get(RCName)
@@ -186,16 +188,16 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 		// Every test case in this suite assumes that cluster add-on pods stay stable and
 		// cannot be run in parallel with any other test that touches Nodes or Pods.
 		// It is so because we need to have precise control on what's running in the cluster.
-		systemPods, err := c.Pods(api.NamespaceSystem).List(api.ListOptions{})
+		systemPods, err := framework.GetPodsInNamespace(c, ns, ignoreLabels)
 		Expect(err).NotTo(HaveOccurred())
 		systemPodsNo = 0
-		for _, pod := range systemPods.Items {
+		for _, pod := range systemPods {
 			if !masterNodes.Has(pod.Spec.NodeName) && pod.DeletionTimestamp == nil {
 				systemPodsNo++
 			}
 		}
 
-		err = framework.WaitForPodsRunningReady(api.NamespaceSystem, int32(systemPodsNo), framework.PodReadyBeforeTimeout)
+		err = framework.WaitForPodsRunningReady(api.NamespaceSystem, int32(systemPodsNo), framework.PodReadyBeforeTimeout, ignoreLabels)
 		Expect(err).NotTo(HaveOccurred())
 
 		for _, node := range nodeList.Items {
@@ -237,7 +239,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  "",
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -256,7 +258,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -288,7 +290,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 		for _, pod := range pods.Items {
 			_, found := nodeToCapacityMap[pod.Spec.NodeName]
 			if found && pod.Status.Phase == api.PodRunning {
-				framework.Logf("Pod %v requesting resource %v on Node %v", pod.Name, getRequestedCPU(pod), pod.Spec.NodeName)
+				framework.Logf("Pod %v requesting resource cpu=%vm on Node %v", pod.Name, getRequestedCPU(pod), pod.Spec.NodeName)
 				nodeToCapacityMap[pod.Spec.NodeName] -= getRequestedCPU(pod)
 			}
 		}
@@ -296,7 +298,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 		var podsNeededForSaturation int
 		milliCpuPerPod := int64(500)
 		for name, leftCapacity := range nodeToCapacityMap {
-			framework.Logf("Node: %v has capacity: %v", name, leftCapacity)
+			framework.Logf("Node: %v has cpu capacity: %vm", name, leftCapacity)
 			podsNeededForSaturation += (int)(leftCapacity / milliCpuPerPod)
 		}
 
@@ -314,7 +316,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  "",
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 						Resources: api.ResourceRequirements{
 							Limits: api.ResourceList{
 								"cpu": *resource.NewMilliQuantity(milliCpuPerPod, "DecimalSI"),
@@ -341,7 +343,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 						Resources: api.ResourceRequirements{
 							Limits: api.ResourceList{
 								"cpu": *resource.NewMilliQuantity(milliCpuPerPod, "DecimalSI"),
@@ -381,7 +383,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 				NodeSelector: map[string]string{
@@ -424,7 +426,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -460,7 +462,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -498,7 +500,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  labelPodName,
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 				NodeSelector: map[string]string{
@@ -562,7 +564,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -597,7 +599,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -653,7 +655,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  labelPodName,
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -691,7 +693,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause-amd64:3.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -770,7 +772,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -821,7 +823,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -856,7 +858,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -909,7 +911,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  labelPodName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -948,7 +950,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -1001,7 +1003,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  labelPodName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -1036,7 +1038,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -1097,7 +1099,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  labelPodName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -1136,7 +1138,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -1200,7 +1202,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  labelPodName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -1239,7 +1241,7 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 				Containers: []api.Container{
 					{
 						Name:  podName,
-						Image: "gcr.io/google_containers/pause:2.0",
+						Image: framework.GetPauseImageName(f.Client),
 					},
 				},
 			},
@@ -1279,5 +1281,251 @@ var _ = framework.KubeDescribe("SchedulerPredicates [Serial]", func() {
 		labelPod, err := c.Pods(ns).Get(labelPodName)
 		framework.ExpectNoError(err)
 		Expect(labelPod.Spec.NodeName).To(Equal(nodeName))
+	})
+
+	// 1. Run a pod to get an available node, then delete the pod
+	// 2. Taint the node with a random taint
+	// 3. Try to relaunch the pod with tolerations tolerate the taints on node,
+	// and the pod's nodeName specified to the name of node found in step 1
+	It("validates that taints-tolerations is respected if matching", func() {
+		// launch a pod to find a node which can launch a pod. We intentionally do
+		// not just take the node list and choose the first of them. Depending on the
+		// cluster and the scheduler it might be that a "normal" pod cannot be
+		// scheduled onto it.
+		By("Trying to launch a pod without a toleration to get a node which can launch it.")
+		podName := "without-toleration"
+		_, err := c.Pods(ns).Create(&api.Pod{
+			TypeMeta: unversioned.TypeMeta{
+				Kind: "Pod",
+			},
+			ObjectMeta: api.ObjectMeta{
+				Name: podName,
+			},
+			Spec: api.PodSpec{
+				Containers: []api.Container{
+					{
+						Name:  podName,
+						Image: framework.GetPauseImageName(f.Client),
+					},
+				},
+			},
+		})
+		framework.ExpectNoError(err)
+		framework.ExpectNoError(framework.WaitForPodRunningInNamespace(c, podName, ns))
+		pod, err := c.Pods(ns).Get(podName)
+		framework.ExpectNoError(err)
+
+		nodeName := pod.Spec.NodeName
+		err = c.Pods(ns).Delete(podName, api.NewDeleteOptions(0))
+		framework.ExpectNoError(err)
+
+		By("Trying to apply a random taint on the found node.")
+		taintName := fmt.Sprintf("kubernetes.io/e2e-taint-key-%s", string(util.NewUUID()))
+		taintValue := "testing-taint-value"
+		taintEffect := string(api.TaintEffectNoSchedule)
+		framework.RunKubectlOrDie("taint", "nodes", nodeName, taintName+"="+taintValue+":"+taintEffect)
+		By("verifying the node has the taint " + taintName + " with the value " + taintValue)
+		output := framework.RunKubectlOrDie("describe", "node", nodeName)
+		requiredStrings := [][]string{
+			{"Name:", nodeName},
+			{"Taints:"},
+			{taintName, taintValue, taintEffect},
+		}
+		checkOutput(output, requiredStrings)
+
+		By("Trying to apply a random label on the found node.")
+		labelKey := fmt.Sprintf("kubernetes.io/e2e-label-key-%s", string(util.NewUUID()))
+		labelValue := "testing-label-value"
+		framework.RunKubectlOrDie("label", "nodes", nodeName, labelKey+"="+labelValue)
+		By("verifying the node has the label " + labelKey + " with the value " + labelValue)
+		labelOutput := framework.RunKubectlOrDie("describe", "node", nodeName)
+		labelOutputRequiredStrings := [][]string{
+			{"Name:", nodeName},
+			{"Labels:"},
+			{labelKey + "=" + labelValue},
+		}
+		checkOutput(labelOutput, labelOutputRequiredStrings)
+
+		By("Trying to relaunch the pod, now with tolerations.")
+		tolerationPodName := "with-tolerations"
+		_, err = c.Pods(ns).Create(&api.Pod{
+			TypeMeta: unversioned.TypeMeta{
+				Kind: "Pod",
+			},
+			ObjectMeta: api.ObjectMeta{
+				Name: tolerationPodName,
+				Annotations: map[string]string{
+					"scheduler.alpha.kubernetes.io/tolerations": `
+						[
+							{
+								"key": "` + taintName + `",
+								"value": "` + taintValue + `",
+								"effect": "` + taintEffect + `"
+							}
+						]`,
+				},
+			},
+			Spec: api.PodSpec{
+				NodeSelector: map[string]string{labelKey: labelValue},
+				Containers: []api.Container{
+					{
+						Name:  tolerationPodName,
+						Image: framework.GetPauseImageName(f.Client),
+					},
+				},
+			},
+		})
+		framework.ExpectNoError(err)
+		defer c.Pods(ns).Delete(tolerationPodName, api.NewDeleteOptions(0))
+
+		// check that pod got scheduled. We intentionally DO NOT check that the
+		// pod is running because this will create a race condition with the
+		// kubelet and the scheduler: the scheduler might have scheduled a pod
+		// already when the kubelet does not know about its new taint yet. The
+		// kubelet will then refuse to launch the pod.
+		framework.ExpectNoError(framework.WaitForPodNotPending(c, ns, tolerationPodName))
+		deployedPod, err := c.Pods(ns).Get(tolerationPodName)
+		framework.ExpectNoError(err)
+		Expect(deployedPod.Spec.NodeName).To(Equal(nodeName))
+
+		By("removing the taint " + taintName + " off the node " + nodeName)
+		framework.RunKubectlOrDie("taint", "nodes", nodeName, taintName+"-")
+		By("verifying the node doesn't have the taint " + taintName)
+		output = framework.RunKubectlOrDie("describe", "node", nodeName)
+		if strings.Contains(output, taintName) {
+			framework.Failf("Failed removing taint " + taintName + " of the node " + nodeName)
+		}
+
+		By("removing the label " + labelKey + " off the node " + nodeName)
+		framework.RunKubectlOrDie("label", "nodes", nodeName, labelKey+"-")
+		By("verifying the node doesn't have the label " + labelKey)
+		output = framework.RunKubectlOrDie("describe", "node", nodeName)
+		if strings.Contains(output, labelKey) {
+			framework.Failf("Failed removing label " + labelKey + " of the node " + nodeName)
+		}
+	})
+
+	// 1. Run a pod to get an available node, then delete the pod
+	// 2. Taint the node with a random taint
+	// 3. Try to relaunch the pod still no tolerations,
+	// and the pod's nodeName specified to the name of node found in step 1
+	It("validates that taints-tolerations is respected if not matching", func() {
+		// launch a pod to find a node which can launch a pod. We intentionally do
+		// not just take the node list and choose the first of them. Depending on the
+		// cluster and the scheduler it might be that a "normal" pod cannot be
+		// scheduled onto it.
+		By("Trying to launch a pod without a toleration to get a node which can launch it.")
+		podName := "without-toleration"
+		_, err := c.Pods(ns).Create(&api.Pod{
+			TypeMeta: unversioned.TypeMeta{
+				Kind: "Pod",
+			},
+			ObjectMeta: api.ObjectMeta{
+				Name: podName,
+			},
+			Spec: api.PodSpec{
+				Containers: []api.Container{
+					{
+						Name:  podName,
+						Image: framework.GetPauseImageName(f.Client),
+					},
+				},
+			},
+		})
+		framework.ExpectNoError(err)
+		framework.ExpectNoError(framework.WaitForPodRunningInNamespace(c, podName, ns))
+		pod, err := c.Pods(ns).Get(podName)
+		framework.ExpectNoError(err)
+
+		nodeName := pod.Spec.NodeName
+		err = c.Pods(ns).Delete(podName, api.NewDeleteOptions(0))
+		framework.ExpectNoError(err)
+
+		By("Trying to apply a random taint on the found node.")
+		taintName := fmt.Sprintf("kubernetes.io/e2e-taint-key-%s", string(util.NewUUID()))
+		taintValue := "testing-taint-value"
+		taintEffect := string(api.TaintEffectNoSchedule)
+		framework.RunKubectlOrDie("taint", "nodes", nodeName, taintName+"="+taintValue+":"+taintEffect)
+		By("verifying the node has the taint " + taintName + " with the value " + taintValue)
+		output := framework.RunKubectlOrDie("describe", "node", nodeName)
+		requiredStrings := [][]string{
+			{"Name:", nodeName},
+			{"Taints:"},
+			{taintName, taintValue, taintEffect},
+		}
+		checkOutput(output, requiredStrings)
+
+		By("Trying to apply a random label on the found node.")
+		labelKey := fmt.Sprintf("kubernetes.io/e2e-label-key-%s", string(util.NewUUID()))
+		labelValue := "testing-label-value"
+		framework.RunKubectlOrDie("label", "nodes", nodeName, labelKey+"="+labelValue)
+		By("verifying the node has the label " + labelKey + " with the value " + labelValue)
+		labelOutput := framework.RunKubectlOrDie("describe", "node", nodeName)
+		labelOutputRequiredStrings := [][]string{
+			{"Name:", nodeName},
+			{"Labels:"},
+			{labelKey + "=" + labelValue},
+		}
+		checkOutput(labelOutput, labelOutputRequiredStrings)
+
+		By("Trying to relaunch the pod, still no tolerations.")
+		podNameNoTolerations := "still-no-tolerations"
+		podNoTolerations := api.Pod{
+			TypeMeta: unversioned.TypeMeta{
+				Kind: "Pod",
+			},
+			ObjectMeta: api.ObjectMeta{
+				Name: podNameNoTolerations,
+			},
+			Spec: api.PodSpec{
+				NodeSelector: map[string]string{labelKey: labelValue},
+				Containers: []api.Container{
+					{
+						Name:  podNameNoTolerations,
+						Image: framework.GetPauseImageName(f.Client),
+					},
+				},
+			},
+		}
+		_, err = c.Pods(ns).Create(&podNoTolerations)
+		framework.ExpectNoError(err)
+		// Wait a bit to allow scheduler to do its thing
+		// TODO: this is brittle; there's no guarantee the scheduler will have run in 10 seconds.
+		framework.Logf("Sleeping 10 seconds and crossing our fingers that scheduler will run in that time.")
+		time.Sleep(10 * time.Second)
+
+		verifyResult(c, podNameNoTolerations, ns)
+		cleanupPods(c, ns)
+
+		By("removing the taint " + taintName + " off the node " + nodeName)
+		framework.RunKubectlOrDie("taint", "nodes", nodeName, taintName+"-")
+		By("verifying the node doesn't have the taint " + taintName)
+		output = framework.RunKubectlOrDie("describe", "node", nodeName)
+		if strings.Contains(output, taintName) {
+			framework.Failf("Failed removing taint " + taintName + " of the node " + nodeName)
+		}
+
+		By("Trying to relaunch the same.")
+		_, err = c.Pods(ns).Create(&podNoTolerations)
+		framework.ExpectNoError(err)
+		defer c.Pods(ns).Delete(podNameNoTolerations, api.NewDeleteOptions(0))
+
+		// check that pod got scheduled. We intentionally DO NOT check that the
+		// pod is running because this will create a race condition with the
+		// kubelet and the scheduler: the scheduler might have scheduled a pod
+		// already when the kubelet does not know about its new taint yet. The
+		// kubelet will then refuse to launch the pod.
+		framework.ExpectNoError(framework.WaitForPodNotPending(c, ns, podNameNoTolerations))
+		deployedPod, err := c.Pods(ns).Get(podNameNoTolerations)
+		framework.ExpectNoError(err)
+		Expect(deployedPod.Spec.NodeName).To(Equal(nodeName))
+
+		By("removing the label " + labelKey + " off the node " + nodeName)
+		framework.RunKubectlOrDie("label", "nodes", nodeName, labelKey+"-")
+		By("verifying the node doesn't have the label " + labelKey)
+		output = framework.RunKubectlOrDie("describe", "node", nodeName)
+		if strings.Contains(output, labelKey) {
+			framework.Failf("Failed removing label " + labelKey + " of the node " + nodeName)
+		}
 	})
 })

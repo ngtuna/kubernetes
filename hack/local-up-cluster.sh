@@ -25,6 +25,7 @@ ALLOW_PRIVILEGED=${ALLOW_PRIVILEGED:-""}
 ALLOW_SECURITY_CONTEXT=${ALLOW_SECURITY_CONTEXT:-""}
 RUNTIME_CONFIG=${RUNTIME_CONFIG:-""}
 NET_PLUGIN=${NET_PLUGIN:-""}
+NET_PLUGIN_DIR=${NET_PLUGIN_DIR:-""}
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
 # We disable cluster DNS by default because this script uses docker0 (or whatever
 # container bridge docker is currently using) and we don't know the IP of the
@@ -92,11 +93,20 @@ function test_docker {
     fi
 }
 
+function test_openssl_installed {
+    openssl version >& /dev/null
+    if [ "$?" != "0" ]; then
+      echo "Failed to run openssl. Please ensure openssl is installed"
+      exit 1
+    fi
+}
+
 # Shut down anyway if there's an error.
 set +e
 
 API_PORT=${API_PORT:-8080}
 API_HOST=${API_HOST:-127.0.0.1}
+KUBELET_HOST=${KUBELET_HOST:-"127.0.0.1"}
 # By default only allow CORS for requests on localhost
 API_CORS_ALLOWED_ORIGINS=${API_CORS_ALLOWED_ORIGINS:-"/127.0.0.1(:[0-9]+)?$,/localhost(:[0-9]+)?$"}
 KUBELET_PORT=${KUBELET_PORT:-10250}
@@ -269,7 +279,7 @@ function start_apiserver {
       --insecure-bind-address="${API_HOST}" \
       --insecure-port="${API_PORT}" \
       --advertise-address="${API_HOST}" \
-      --etcd-servers="http://127.0.0.1:4001" \
+      --etcd-servers="http://${ETCD_HOST}:${ETCD_PORT}" \
       --service-cluster-ip-range="10.0.0.0/24" \
       --cloud-provider="${CLOUD_PROVIDER}" \
       --cors-allowed-origins="${API_CORS_ALLOWED_ORIGINS}" >"${APISERVER_LOG}" 2>&1 &
@@ -330,6 +340,11 @@ function start_kubelet {
       if [[ -n "${NET_PLUGIN}" ]]; then
         net_plugin_args="--network-plugin=${NET_PLUGIN}"
       fi
+      
+      net_plugin_dir_args=""
+      if [[ -n "${NET_PLUGIN_DIR}" ]]; then
+        net_plugin_dir_args="--network-plugin-dir=${NET_PLUGIN_DIR}"
+      fi
 
       kubenet_plugin_args=""
       if [[ "${NET_PLUGIN}" == "kubenet" ]]; then
@@ -344,10 +359,11 @@ function start_kubelet {
         --rkt-stage1-image="${RKT_STAGE1_IMAGE}" \
         --hostname-override="${HOSTNAME_OVERRIDE}" \
         --cloud-provider="${CLOUD_PROVIDER}" \
-        --address="127.0.0.1" \
+        --address="${KUBELET_HOST}" \
         --api-servers="${API_HOST}:${API_PORT}" \
         --cpu-cfs-quota=${CPU_CFS_QUOTA} \
         ${dns_args} \
+        ${net_plugin_dir_args} \
         ${net_plugin_args} \
         ${kubenet_plugin_args} \
         --port="$KUBELET_PORT" >"${KUBELET_LOG}" 2>&1 &
@@ -435,6 +451,7 @@ EOF
 
 test_docker
 test_apiserver_off
+test_openssl_installed
 
 ### IF the user didn't supply an output/ for the build... Then we detect.
 if [ "$GO_OUT" == "" ]; then

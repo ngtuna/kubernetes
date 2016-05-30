@@ -28,6 +28,8 @@ import (
 type Resource string
 
 const (
+	ClusterRoles             Resource = "clusterroles"
+	ClusterRoleBindings      Resource = "clusterrolebindings"
 	Controllers              Resource = "controllers"
 	Daemonsets               Resource = "daemonsets"
 	Deployments              Resource = "deployments"
@@ -39,6 +41,7 @@ const (
 	Jobs                     Resource = "jobs"
 	LimitRanges              Resource = "limitranges"
 	Namespaces               Resource = "namespaces"
+	NetworkPolicys           Resource = "networkpolicies"
 	Nodes                    Resource = "nodes"
 	PersistentVolumes        Resource = "persistentvolumes"
 	PersistentVolumeClaims   Resource = "persistentvolumeclaims"
@@ -46,6 +49,9 @@ const (
 	PodTemplates             Resource = "podtemplates"
 	Replicasets              Resource = "replicasets"
 	ResourceQuotas           Resource = "resourcequotas"
+	ScheduledJobs            Resource = "scheduledjobs"
+	Roles                    Resource = "roles"
+	RoleBindings             Resource = "rolebindings"
 	Secrets                  Resource = "secrets"
 	ServiceAccounts          Resource = "serviceaccounts"
 	Services                 Resource = "services"
@@ -55,6 +61,8 @@ var watchCacheSizes map[Resource]int
 
 func init() {
 	watchCacheSizes = make(map[Resource]int)
+	watchCacheSizes[ClusterRoles] = 100
+	watchCacheSizes[ClusterRoleBindings] = 100
 	watchCacheSizes[Controllers] = 100
 	watchCacheSizes[Daemonsets] = 100
 	watchCacheSizes[Deployments] = 100
@@ -66,6 +74,7 @@ func init() {
 	watchCacheSizes[Jobs] = 100
 	watchCacheSizes[LimitRanges] = 100
 	watchCacheSizes[Namespaces] = 100
+	watchCacheSizes[NetworkPolicys] = 100
 	watchCacheSizes[Nodes] = 1000
 	watchCacheSizes[PersistentVolumes] = 100
 	watchCacheSizes[PersistentVolumeClaims] = 100
@@ -73,6 +82,9 @@ func init() {
 	watchCacheSizes[PodTemplates] = 100
 	watchCacheSizes[Replicasets] = 100
 	watchCacheSizes[ResourceQuotas] = 100
+	watchCacheSizes[ScheduledJobs] = 100
+	watchCacheSizes[Roles] = 100
+	watchCacheSizes[RoleBindings] = 100
 	watchCacheSizes[Secrets] = 100
 	watchCacheSizes[ServiceAccounts] = 100
 	watchCacheSizes[Services] = 100

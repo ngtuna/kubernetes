@@ -101,10 +101,9 @@ func (s *Scheduler) scheduleOne() {
 		s.config.Error(pod, err)
 		s.config.Recorder.Eventf(pod, api.EventTypeWarning, "FailedScheduling", "%v", err)
 		s.config.PodConditionUpdater.Update(pod, &api.PodCondition{
-			Type:    api.PodScheduled,
-			Status:  api.ConditionFalse,
-			Reason:  "Unschedulable",
-			Message: err.Error(),
+			Type:   api.PodScheduled,
+			Status: api.ConditionFalse,
+			Reason: "Unschedulable",
 		})
 		return
 	}
@@ -120,7 +119,9 @@ func (s *Scheduler) scheduleOne() {
 	// will self-repair.
 	assumed := *pod
 	assumed.Spec.NodeName = dest
-	s.config.SchedulerCache.AssumePod(&assumed)
+	if err := s.config.SchedulerCache.AssumePod(&assumed); err != nil {
+		glog.Errorf("scheduler cache AssumePod failed: %v", err)
+	}
 
 	go func() {
 		defer metrics.E2eSchedulingLatency.Observe(metrics.SinceInMicroseconds(start))
@@ -138,14 +139,13 @@ func (s *Scheduler) scheduleOne() {
 		// it's atomic with setting host.
 		err := s.config.Binder.Bind(b)
 		if err != nil {
-			glog.V(1).Infof("Failed to bind pod: %+v", err)
+			glog.V(1).Infof("Failed to bind pod: %v/%v", pod.Namespace, pod.Name)
 			s.config.Error(pod, err)
 			s.config.Recorder.Eventf(pod, api.EventTypeNormal, "FailedScheduling", "Binding rejected: %v", err)
 			s.config.PodConditionUpdater.Update(pod, &api.PodCondition{
-				Type:    api.PodScheduled,
-				Status:  api.ConditionFalse,
-				Reason:  "BindingRejected",
-				Message: err.Error(),
+				Type:   api.PodScheduled,
+				Status: api.ConditionFalse,
+				Reason: "BindingRejected",
 			})
 			return
 		}

@@ -69,7 +69,7 @@ func runResourceTrackingTest(f *framework.Framework, podsPerNode int, nodeNames 
 		Client:    f.Client,
 		Name:      rcName,
 		Namespace: f.Namespace.Name,
-		Image:     "gcr.io/google_containers/pause-amd64:3.0",
+		Image:     framework.GetPauseImageName(f.Client),
 		Replicas:  totalPods,
 	})).NotTo(HaveOccurred())
 
@@ -193,7 +193,7 @@ var _ = framework.KubeDescribe("Kubelet [Serial] [Slow]", func() {
 	var rm *framework.ResourceMonitor
 
 	BeforeEach(func() {
-		nodes := framework.ListSchedulableNodesOrDie(f.Client)
+		nodes := framework.GetReadySchedulableNodesOrDie(f.Client)
 		nodeNames = sets.NewString()
 		for _, node := range nodes.Items {
 			nodeNames.Insert(node.Name)

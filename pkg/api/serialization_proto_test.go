@@ -37,7 +37,7 @@ import (
 
 func init() {
 	codecsToTest = append(codecsToTest, func(version unversioned.GroupVersion, item runtime.Object) (runtime.Codec, error) {
-		s := protobuf.NewSerializer(api.Scheme, runtime.ObjectTyperToTyper(api.Scheme), "application/arbitrary.content.type")
+		s := protobuf.NewSerializer(api.Scheme, api.Scheme, "application/arbitrary.content.type")
 		return api.Codecs.CodecForVersions(s, s, testapi.ExternalGroupVersions(), nil), nil
 	})
 }
@@ -67,6 +67,9 @@ func TestUniversalDeserializer(t *testing.T) {
 func TestProtobufRoundTrip(t *testing.T) {
 	obj := &v1.Pod{}
 	apitesting.FuzzerFor(t, v1.SchemeGroupVersion, rand.NewSource(benchmarkSeed)).Fuzz(obj)
+	// InitContainers are turned into annotations by conversion.
+	obj.Spec.InitContainers = nil
+	obj.Status.InitContainerStatuses = nil
 	data, err := obj.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +80,7 @@ func TestProtobufRoundTrip(t *testing.T) {
 	}
 	if !api.Semantic.Equalities.DeepEqual(out, obj) {
 		t.Logf("marshal\n%s", hex.Dump(data))
-		t.Fatalf("Unmarshal is unequal\n%s", diff.ObjectGoPrintSideBySide(out, obj))
+		t.Fatalf("Unmarshal is unequal\n%s", diff.ObjectGoPrintDiff(out, obj))
 	}
 }
 
@@ -135,7 +138,7 @@ func BenchmarkEncodeProtobufGeneratedMarshal(b *testing.B) {
 func BenchmarkDecodeCodecToInternalProtobuf(b *testing.B) {
 	items := benchmarkItems()
 	width := len(items)
-	s := protobuf.NewSerializer(api.Scheme, runtime.ObjectTyperToTyper(api.Scheme), "application/arbitrary.content.type")
+	s := protobuf.NewSerializer(api.Scheme, api.Scheme, "application/arbitrary.content.type")
 	encoder := api.Codecs.EncoderForVersion(s, v1.SchemeGroupVersion)
 	var encoded [][]byte
 	for i := range items {

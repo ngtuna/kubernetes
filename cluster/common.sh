@@ -38,7 +38,6 @@ KUBE_RELEASE_VERSION_REGEX="^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*
 # kube::release::parse_and_validate_ci_version()
 KUBE_CI_VERSION_REGEX="^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-(beta|alpha)\\.(0|[1-9][0-9]*)(\\.(0|[1-9][0-9]*)\\+[-0-9a-z]*)?$"
 
-
 # Generate kubeconfig data for the created cluster.
 # Assumed vars:
 #   KUBE_USER
@@ -50,12 +49,23 @@ KUBE_CI_VERSION_REGEX="^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-(be
 # If the apiserver supports bearer auth, also provide:
 #   KUBE_BEARER_TOKEN
 #
+# If the kubeconfig context being created should NOT be set as the current context
+# SECONDARY_KUBECONFIG=true
+#
+# To explicitly name the context being created, use OVERRIDE_CONTEXT
+#
 # The following can be omitted for --insecure-skip-tls-verify
 #   KUBE_CERT
 #   KUBE_KEY
 #   CA_CERT
 function create-kubeconfig() {
   local kubectl="${KUBE_ROOT}/cluster/kubectl.sh"
+  SECONDARY_KUBECONFIG=${SECONDARY_KUBECONFIG:-}
+  OVERRIDE_CONTEXT=${OVERRIDE_CONTEXT:-}
+
+  if [[ "$OVERRIDE_CONTEXT" != "" ]];then
+      CONTEXT=$OVERRIDE_CONTEXT
+  fi
 
   export KUBECONFIG=${KUBECONFIG:-$DEFAULT_KUBECONFIG}
   # KUBECONFIG determines the file we write to, but it may not exist yet
@@ -99,7 +109,10 @@ function create-kubeconfig() {
     "${kubectl}" config set-credentials "${CONTEXT}" "${user_args[@]}"
   fi
   "${kubectl}" config set-context "${CONTEXT}" --cluster="${CONTEXT}" --user="${CONTEXT}"
-  "${kubectl}" config use-context "${CONTEXT}"  --cluster="${CONTEXT}"
+
+  if [[ "${SECONDARY_KUBECONFIG}" != "true" ]];then
+      "${kubectl}" config use-context "${CONTEXT}"  --cluster="${CONTEXT}"
+  fi
 
   # If we have a bearer token, also create a credential entry with basic auth
   # so that it is easy to discover the basic auth password for your cluster
@@ -347,7 +360,7 @@ function find-release-tars() {
 
   # This tarball is used by GCI, Ubuntu Trusty, and CoreOS.
   KUBE_MANIFESTS_TAR=
-  if [[ "${KUBE_OS_DISTRIBUTION:-}" == "trusty" || "${KUBE_OS_DISTRIBUTION:-}" == "gci" || "${KUBE_OS_DISTRIBUTION:-}" == "coreos" ]]; then
+  if [[ "${OS_DISTRIBUTION:-}" == "trusty" || "${OS_DISTRIBUTION:-}" == "gci" || "${OS_DISTRIBUTION:-}" == "coreos" ]]; then
     KUBE_MANIFESTS_TAR="${KUBE_ROOT}/server/kubernetes-manifests.tar.gz"
     if [[ ! -f "${KUBE_MANIFESTS_TAR}" ]]; then
       KUBE_MANIFESTS_TAR="${KUBE_ROOT}/_output/release-tars/kubernetes-manifests.tar.gz"
@@ -485,6 +498,7 @@ ENABLE_CLUSTER_MONITORING: $(yaml-quote ${ENABLE_CLUSTER_MONITORING:-none})
 ENABLE_L7_LOADBALANCING: $(yaml-quote ${ENABLE_L7_LOADBALANCING:-none})
 ENABLE_CLUSTER_LOGGING: $(yaml-quote ${ENABLE_CLUSTER_LOGGING:-false})
 ENABLE_CLUSTER_UI: $(yaml-quote ${ENABLE_CLUSTER_UI:-false})
+ENABLE_NODE_PROBLEM_DETECTOR: $(yaml-quote ${ENABLE_NODE_PROBLEM_DETECTOR:-false})
 ENABLE_NODE_LOGGING: $(yaml-quote ${ENABLE_NODE_LOGGING:-false})
 LOGGING_DESTINATION: $(yaml-quote ${LOGGING_DESTINATION:-})
 ELASTICSEARCH_LOGGING_REPLICAS: $(yaml-quote ${ELASTICSEARCH_LOGGING_REPLICAS:-})
@@ -504,6 +518,7 @@ CA_CERT: $(yaml-quote ${CA_CERT_BASE64:-})
 KUBELET_CERT: $(yaml-quote ${KUBELET_CERT_BASE64:-})
 KUBELET_KEY: $(yaml-quote ${KUBELET_KEY_BASE64:-})
 NETWORK_PROVIDER: $(yaml-quote ${NETWORK_PROVIDER:-})
+PREPULL_E2E_IMAGES: $(yaml-quote ${PREPULL_E2E_IMAGES:-})
 HAIRPIN_MODE: $(yaml-quote ${HAIRPIN_MODE:-})
 OPENCONTRAIL_TAG: $(yaml-quote ${OPENCONTRAIL_TAG:-})
 OPENCONTRAIL_KUBERNETES_TAG: $(yaml-quote ${OPENCONTRAIL_KUBERNETES_TAG:-})
@@ -578,6 +593,7 @@ ENABLE_MANIFEST_URL: $(yaml-quote ${ENABLE_MANIFEST_URL:-false})
 MANIFEST_URL: $(yaml-quote ${MANIFEST_URL:-})
 MANIFEST_URL_HEADER: $(yaml-quote ${MANIFEST_URL_HEADER:-})
 NUM_NODES: $(yaml-quote ${NUM_NODES})
+MASTER_NAME: $(yaml-quote ${MASTER_NAME})
 EOF
     if [ -n "${APISERVER_TEST_ARGS:-}" ]; then
       cat >>$file <<EOF

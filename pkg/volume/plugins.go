@@ -101,7 +101,7 @@ type RecyclableVolumePlugin interface {
 	VolumePlugin
 	// NewRecycler creates a new volume.Recycler which knows how to reclaim this resource
 	// after the volume's release from a PersistentVolumeClaim
-	NewRecycler(spec *Spec) (Recycler, error)
+	NewRecycler(pvName string, spec *Spec) (Recycler, error)
 }
 
 // DeletableVolumePlugin is an extended interface of VolumePlugin and is used by persistent volumes that want
@@ -133,6 +133,18 @@ type AttachableVolumePlugin interface {
 	VolumePlugin
 	NewAttacher() (Attacher, error)
 	NewDetacher() (Detacher, error)
+
+	// GetUniqueVolumeName returns a unique name representing the volume
+	// defined in spec. e.g. pluginname-deviceName-readwrite
+	// This helps ensures that the same operation (attach/detach) is never
+	// started on the same volume.
+	// If the plugin does not support the given spec, this returns an error.
+	GetUniqueVolumeName(spec *Spec) (string, error)
+
+	// GetDeviceName returns the name or ID of the device referenced in the
+	// specified volume spec. This is passed by callers to the Deatch method.
+	// If the plugin does not support the given spec, this returns an error.
+	GetDeviceName(spec *Spec) (string, error)
 }
 
 // VolumeHost is an interface that plugins can use to access the kubelet.
@@ -238,6 +250,9 @@ type VolumeConfig struct {
 	// Example: 5Gi volume x 30s increment = 150s + 30s minimum = 180s ActiveDeadlineSeconds for recycler pod
 	RecyclerTimeoutIncrement int
 
+	// PVName is name of the PersistentVolume instance that is being recycled. It is used to generate unique recycler pod name.
+	PVName string
+
 	// OtherAttributes stores config as strings.  These strings are opaque to the system and only understood by the binary
 	// hosting the plugin and the plugin itself.
 	OtherAttributes map[string]string
@@ -272,8 +287,8 @@ func (pm *VolumePluginMgr) InitPlugins(plugins []VolumePlugin, host VolumeHost) 
 	allErrs := []error{}
 	for _, plugin := range plugins {
 		name := plugin.Name()
-		if len(validation.IsQualifiedName(name)) != 0 {
-			allErrs = append(allErrs, fmt.Errorf("volume plugin has invalid name: %#v", plugin))
+		if errs := validation.IsQualifiedName(name); len(errs) != 0 {
+			allErrs = append(allErrs, fmt.Errorf("volume plugin has invalid name: %q: %s", name, strings.Join(errs, ";")))
 			continue
 		}
 

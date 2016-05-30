@@ -79,6 +79,11 @@ function configure-etcd-events() {
   evaluate-manifest ${MANIFESTS_DIR}/etcd-events.yaml /etc/kubernetes/manifests/etcd-events.yaml
 }
 
+function configure-addon-manager() {
+  echo "Configuring addon-manager"
+  evaluate-manifest ${MANIFESTS_DIR}/kube-addon-manager.yaml /etc/kubernetes/manifests/kube-addon-manager.yaml
+}
+
 function configure-kube-apiserver() {
   echo "Configuring kube-apiserver"
   
@@ -136,6 +141,10 @@ function configure-master-addons() {
     evaluate-manifests-dir ${MANIFESTS_DIR}/addons/dashboard ${addon_dir}/dashboard
   fi
 
+  if [[ "${ENABLE_CLUSTER_LOGGING}" == "true" ]]; then
+    evaluate-manifests-dir ${MANIFESTS_DIR}/addons/fluentd-elasticsearch  ${addon_dir}/fluentd-elasticsearch
+  fi
+
   if [[ "${ENABLE_CLUSTER_MONITORING}" == "influxdb" ]]; then
     evaluate-manifests-dir ${MANIFESTS_DIR}/addons/cluster-monitoring/influxdb  ${addon_dir}/cluster-monitoring/influxdb
   elif [[ "${ENABLE_CLUSTER_MONITORING}" == "google" ]]; then
@@ -160,6 +169,7 @@ function configure-master-components() {
   configure-kube-apiserver
   configure-kube-scheduler
   configure-kube-controller-manager
+  configure-addon-manager
   configure-master-addons
 }
 
@@ -229,14 +239,14 @@ function create-salt-master-auth() {
     if  [[ ! -z "${CA_CERT:-}" ]] && [[ ! -z "${MASTER_CERT:-}" ]] && [[ ! -z "${MASTER_KEY:-}" ]]; then
       mkdir -p /srv/kubernetes
       (umask 077;
-        echo "${CA_CERT}" | base64 -d > /srv/kubernetes/ca.crt;
-        echo "${MASTER_CERT}" | base64 -d > /srv/kubernetes/server.cert;
-        echo "${MASTER_KEY}" | base64 -d > /srv/kubernetes/server.key;
+        echo "${CA_CERT}" | base64 --decode > /srv/kubernetes/ca.crt;
+        echo "${MASTER_CERT}" | base64 --decode > /srv/kubernetes/server.cert;
+        echo "${MASTER_KEY}" | base64 --decode > /srv/kubernetes/server.key;
         # Kubecfg cert/key are optional and included for backwards compatibility.
         # TODO(roberthbailey): Remove these two lines once GKE no longer requires
         # fetching clients certs from the master VM.
-        echo "${KUBECFG_CERT:-}" | base64 -d > /srv/kubernetes/kubecfg.crt;
-        echo "${KUBECFG_KEY:-}" | base64 -d > /srv/kubernetes/kubecfg.key)
+        echo "${KUBECFG_CERT:-}" | base64 --decode > /srv/kubernetes/kubecfg.crt;
+        echo "${KUBECFG_KEY:-}" | base64 --decode > /srv/kubernetes/kubecfg.key)
     fi
   fi
   if [ ! -e "${BASIC_AUTH_FILE}" ]; then

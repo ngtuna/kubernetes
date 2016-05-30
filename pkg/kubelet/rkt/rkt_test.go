@@ -19,6 +19,7 @@ package rkt
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"sort"
 	"testing"
@@ -35,9 +36,13 @@ import (
 	containertesting "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	kubetesting "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
+	"k8s.io/kubernetes/pkg/kubelet/network"
+	"k8s.io/kubernetes/pkg/kubelet/network/mock_network"
 	"k8s.io/kubernetes/pkg/kubelet/rkt/mock_os"
-	"k8s.io/kubernetes/pkg/types"
+	"k8s.io/kubernetes/pkg/kubelet/types"
+	kubetypes "k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util/errors"
+	utilexec "k8s.io/kubernetes/pkg/util/exec"
 	utiltesting "k8s.io/kubernetes/pkg/util/testing"
 )
 
@@ -66,8 +71,7 @@ func mustRktHash(hash string) *appctypes.Hash {
 }
 
 func makeRktPod(rktPodState rktapi.PodState,
-	rktPodID, podUID, podName, podNamespace,
-	podIP string, podCreatedAt, podStartedAt int64,
+	rktPodID, podUID, podName, podNamespace string, podCreatedAt, podStartedAt int64,
 	podRestartCount string, appNames, imgIDs, imgNames,
 	containerHashes []string, appStates []rktapi.AppState,
 	exitcodes []int32) *rktapi.Pod {
@@ -81,15 +85,15 @@ func makeRktPod(rktPodState rktapi.PodState,
 				Value: k8sRktKubeletAnnoValue,
 			},
 			appctypes.Annotation{
-				Name:  *appctypes.MustACIdentifier(k8sRktUIDAnno),
+				Name:  *appctypes.MustACIdentifier(types.KubernetesPodUIDLabel),
 				Value: podUID,
 			},
 			appctypes.Annotation{
-				Name:  *appctypes.MustACIdentifier(k8sRktNameAnno),
+				Name:  *appctypes.MustACIdentifier(types.KubernetesPodNameLabel),
 				Value: podName,
 			},
 			appctypes.Annotation{
-				Name:  *appctypes.MustACIdentifier(k8sRktNamespaceAnno),
+				Name:  *appctypes.MustACIdentifier(types.KubernetesPodNamespaceLabel),
 				Value: podNamespace,
 			},
 			appctypes.Annotation{
@@ -147,7 +151,6 @@ func makeRktPod(rktPodState rktapi.PodState,
 	return &rktapi.Pod{
 		Id:        rktPodID,
 		State:     rktPodState,
-		Networks:  []*rktapi.Network{{Name: defaultNetworkName, Ipv4: podIP}},
 		Apps:      apps,
 		Manifest:  mustMarshalPodManifest(podManifest),
 		StartedAt: podStartedAt,
@@ -365,7 +368,7 @@ func TestGetPods(t *testing.T) {
 			[]*rktapi.Pod{
 				makeRktPod(rktapi.PodState_POD_STATE_RUNNING,
 					"uuid-4002", "42", "guestbook", "default",
-					"10.10.10.42", ns(10), ns(10), "7",
+					ns(10), ns(10), "7",
 					[]string{"app-1", "app-2"},
 					[]string{"img-id-1", "img-id-2"},
 					[]string{"img-name-1", "img-name-2"},
@@ -403,7 +406,7 @@ func TestGetPods(t *testing.T) {
 			[]*rktapi.Pod{
 				makeRktPod(rktapi.PodState_POD_STATE_RUNNING,
 					"uuid-4002", "42", "guestbook", "default",
-					"10.10.10.42", ns(10), ns(20), "7",
+					ns(10), ns(20), "7",
 					[]string{"app-1", "app-2"},
 					[]string{"img-id-1", "img-id-2"},
 					[]string{"img-name-1", "img-name-2"},
@@ -413,7 +416,7 @@ func TestGetPods(t *testing.T) {
 				),
 				makeRktPod(rktapi.PodState_POD_STATE_EXITED,
 					"uuid-4003", "43", "guestbook", "default",
-					"10.10.10.43", ns(30), ns(40), "7",
+					ns(30), ns(40), "7",
 					[]string{"app-11", "app-22"},
 					[]string{"img-id-11", "img-id-22"},
 					[]string{"img-name-11", "img-name-22"},
@@ -423,7 +426,7 @@ func TestGetPods(t *testing.T) {
 				),
 				makeRktPod(rktapi.PodState_POD_STATE_EXITED,
 					"uuid-4004", "43", "guestbook", "default",
-					"10.10.10.44", ns(50), ns(60), "8",
+					ns(50), ns(60), "8",
 					[]string{"app-11", "app-22"},
 					[]string{"img-id-11", "img-id-22"},
 					[]string{"img-name-11", "img-name-22"},
@@ -555,8 +558,11 @@ func TestGetPodsFilters(t *testing.T) {
 }
 
 func TestGetPodStatus(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 	fr := newFakeRktInterface()
 	fs := newFakeSystemd()
+	fnp := mock_network.NewMockNetworkPlugin(ctrl)
 	fos := &containertesting.FakeOS{}
 	frh := &fakeRuntimeHelper{}
 	r := &Runtime{
@@ -564,6 +570,7 @@ func TestGetPodStatus(t *testing.T) {
 		systemd:       fs,
 		runtimeHelper: frh,
 		os:            fos,
+		networkPlugin: fnp,
 	}
 
 	ns := func(seconds int64) int64 {
@@ -584,7 +591,7 @@ func TestGetPodStatus(t *testing.T) {
 			[]*rktapi.Pod{
 				makeRktPod(rktapi.PodState_POD_STATE_RUNNING,
 					"uuid-4002", "42", "guestbook", "default",
-					"10.10.10.42", ns(10), ns(20), "7",
+					ns(10), ns(20), "7",
 					[]string{"app-1", "app-2"},
 					[]string{"img-id-1", "img-id-2"},
 					[]string{"img-name-1", "img-name-2"},
@@ -632,7 +639,7 @@ func TestGetPodStatus(t *testing.T) {
 			[]*rktapi.Pod{
 				makeRktPod(rktapi.PodState_POD_STATE_EXITED,
 					"uuid-4002", "42", "guestbook", "default",
-					"10.10.10.42", ns(10), ns(20), "7",
+					ns(10), ns(20), "7",
 					[]string{"app-1", "app-2"},
 					[]string{"img-id-1", "img-id-2"},
 					[]string{"img-name-1", "img-name-2"},
@@ -642,7 +649,7 @@ func TestGetPodStatus(t *testing.T) {
 				),
 				makeRktPod(rktapi.PodState_POD_STATE_RUNNING, // The latest pod is running.
 					"uuid-4003", "42", "guestbook", "default",
-					"10.10.10.42", ns(10), ns(20), "10",
+					ns(10), ns(20), "10",
 					[]string{"app-1", "app-2"},
 					[]string{"img-id-1", "img-id-2"},
 					[]string{"img-name-1", "img-name-2"},
@@ -714,9 +721,6 @@ func TestGetPodStatus(t *testing.T) {
 		},
 	}
 
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	for i, tt := range tests {
 		testCaseHint := fmt.Sprintf("test case #%d", i)
 		fr.pods = tt.pods
@@ -734,6 +738,14 @@ func TestGetPodStatus(t *testing.T) {
 			mockFI := mock_os.NewMockFileInfo(ctrl)
 			mockFI.EXPECT().ModTime().Return(podTime)
 			return mockFI, nil
+		}
+
+		if tt.result.IP != "" {
+			fnp.EXPECT().GetPodNetworkStatus("default", "guestbook", kubecontainer.ContainerID{ID: "42"}).
+				Return(&network.PodNetworkStatus{IP: net.ParseIP(tt.result.IP)}, nil)
+		} else {
+			fnp.EXPECT().GetPodNetworkStatus("default", "guestbook", kubecontainer.ContainerID{ID: "42"}).
+				Return(nil, fmt.Errorf("no such network"))
 		}
 
 		status, err := r.GetPodStatus("42", "guestbook", "default")
@@ -1076,8 +1088,9 @@ func TestSetApp(t *testing.T) {
 func TestGenerateRunCommand(t *testing.T) {
 	hostName := "test-hostname"
 	tests := []struct {
-		pod  *api.Pod
-		uuid string
+		pod       *api.Pod
+		uuid      string
+		netnsName string
 
 		dnsServers  []string
 		dnsSearches []string
@@ -1095,6 +1108,7 @@ func TestGenerateRunCommand(t *testing.T) {
 				Spec: api.PodSpec{},
 			},
 			"rkt-uuid-foo",
+			"default",
 			[]string{},
 			[]string{},
 			"",
@@ -1109,11 +1123,12 @@ func TestGenerateRunCommand(t *testing.T) {
 				},
 			},
 			"rkt-uuid-foo",
+			"default",
 			[]string{},
 			[]string{},
 			"pod-hostname-foo",
 			nil,
-			"/bin/rkt/rkt --insecure-options=image,ondisk --local-config=/var/rkt/local/data --dir=/var/data run-prepared --net=rkt.kubernetes.io --hostname=pod-hostname-foo rkt-uuid-foo",
+			" --net=\"/var/run/netns/default\" -- /bin/rkt/rkt --insecure-options=image,ondisk --local-config=/var/rkt/local/data --dir=/var/data run-prepared --net=host --hostname=pod-hostname-foo rkt-uuid-foo",
 		},
 		// Case #2, returns no dns, with host-net.
 		{
@@ -1128,6 +1143,7 @@ func TestGenerateRunCommand(t *testing.T) {
 				},
 			},
 			"rkt-uuid-foo",
+			"",
 			[]string{},
 			[]string{},
 			"",
@@ -1147,11 +1163,12 @@ func TestGenerateRunCommand(t *testing.T) {
 				},
 			},
 			"rkt-uuid-foo",
+			"default",
 			[]string{"127.0.0.1"},
 			[]string{"."},
 			"pod-hostname-foo",
 			nil,
-			"/bin/rkt/rkt --insecure-options=image,ondisk --local-config=/var/rkt/local/data --dir=/var/data run-prepared --net=rkt.kubernetes.io --dns=127.0.0.1 --dns-search=. --dns-opt=ndots:5 --hostname=pod-hostname-foo rkt-uuid-foo",
+			" --net=\"/var/run/netns/default\" -- /bin/rkt/rkt --insecure-options=image,ondisk --local-config=/var/rkt/local/data --dir=/var/data run-prepared --net=host --dns=127.0.0.1 --dns-search=. --dns-opt=ndots:5 --hostname=pod-hostname-foo rkt-uuid-foo",
 		},
 		// Case #4, returns no dns, dns searches, with host-network.
 		{
@@ -1166,6 +1183,7 @@ func TestGenerateRunCommand(t *testing.T) {
 				},
 			},
 			"rkt-uuid-foo",
+			"",
 			[]string{"127.0.0.1"},
 			[]string{"."},
 			"pod-hostname-foo",
@@ -1188,8 +1206,13 @@ func TestGenerateRunCommand(t *testing.T) {
 	for i, tt := range tests {
 		testCaseHint := fmt.Sprintf("test case #%d", i)
 		rkt.runtimeHelper = &fakeRuntimeHelper{tt.dnsServers, tt.dnsSearches, tt.hostName, "", tt.err}
+		rkt.execer = &utilexec.FakeExec{CommandScript: []utilexec.FakeCommandAction{func(cmd string, args ...string) utilexec.Cmd {
+			return utilexec.InitFakeCmd(&utilexec.FakeCmd{}, cmd, args...)
+		}}}
 
-		result, err := rkt.generateRunCommand(tt.pod, tt.uuid)
+		// a command should be created of this form, but the returned command shouldn't be called (asserted by having no expectations on it)
+
+		result, err := rkt.generateRunCommand(tt.pod, tt.uuid, tt.netnsName)
 		assert.Equal(t, tt.err, err, testCaseHint)
 		assert.Equal(t, tt.expect, result, testCaseHint)
 	}
@@ -1448,7 +1471,7 @@ func TestGarbageCollect(t *testing.T) {
 					Apps:      []*rktapi.App{fakeApp},
 					Annotations: []*rktapi.KeyValue{
 						{
-							Key:   k8sRktUIDAnno,
+							Key:   types.KubernetesPodUIDLabel,
 							Value: "pod-uid-0",
 						},
 					},
@@ -1461,7 +1484,7 @@ func TestGarbageCollect(t *testing.T) {
 					Apps:      []*rktapi.App{fakeApp},
 					Annotations: []*rktapi.KeyValue{
 						{
-							Key:   k8sRktUIDAnno,
+							Key:   types.KubernetesPodUIDLabel,
 							Value: "pod-uid-1",
 						},
 					},
@@ -1474,7 +1497,7 @@ func TestGarbageCollect(t *testing.T) {
 					Apps:      []*rktapi.App{fakeApp},
 					Annotations: []*rktapi.KeyValue{
 						{
-							Key:   k8sRktUIDAnno,
+							Key:   types.KubernetesPodUIDLabel,
 							Value: "pod-uid-2",
 						},
 					},
@@ -1487,7 +1510,7 @@ func TestGarbageCollect(t *testing.T) {
 					Apps:      []*rktapi.App{fakeApp},
 					Annotations: []*rktapi.KeyValue{
 						{
-							Key:   k8sRktUIDAnno,
+							Key:   types.KubernetesPodUIDLabel,
 							Value: "pod-uid-3",
 						},
 					},
@@ -1500,7 +1523,7 @@ func TestGarbageCollect(t *testing.T) {
 					Apps:      []*rktapi.App{fakeApp},
 					Annotations: []*rktapi.KeyValue{
 						{
-							Key:   k8sRktUIDAnno,
+							Key:   types.KubernetesPodUIDLabel,
 							Value: "pod-uid-4",
 						},
 					},
@@ -1531,7 +1554,7 @@ func TestGarbageCollect(t *testing.T) {
 					Apps:      []*rktapi.App{fakeApp},
 					Annotations: []*rktapi.KeyValue{
 						{
-							Key:   k8sRktUIDAnno,
+							Key:   types.KubernetesPodUIDLabel,
 							Value: "pod-uid-2",
 						},
 					},
@@ -1544,7 +1567,7 @@ func TestGarbageCollect(t *testing.T) {
 					Apps:      []*rktapi.App{fakeApp},
 					Annotations: []*rktapi.KeyValue{
 						{
-							Key:   k8sRktUIDAnno,
+							Key:   types.KubernetesPodUIDLabel,
 							Value: "pod-uid-1",
 						},
 					},
@@ -1557,7 +1580,7 @@ func TestGarbageCollect(t *testing.T) {
 					Apps:      []*rktapi.App{fakeApp},
 					Annotations: []*rktapi.KeyValue{
 						{
-							Key:   k8sRktUIDAnno,
+							Key:   types.KubernetesPodUIDLabel,
 							Value: "pod-uid-0",
 						},
 					},
@@ -1608,6 +1631,137 @@ func TestGarbageCollect(t *testing.T) {
 		cli.Reset()
 		ctrl.Finish()
 		fakeOS.Removes = []string{}
-		getter.pods = make(map[types.UID]*api.Pod)
+		getter.pods = make(map[kubetypes.UID]*api.Pod)
+	}
+}
+
+type annotationsByName []appctypes.Annotation
+
+func (a annotationsByName) Len() int           { return len(a) }
+func (a annotationsByName) Less(x, y int) bool { return a[x].Name < a[y].Name }
+func (a annotationsByName) Swap(x, y int)      { a[x], a[y] = a[y], a[x] }
+
+func TestMakePodManifestAnnotations(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	fr := newFakeRktInterface()
+	fs := newFakeSystemd()
+	r := &Runtime{apisvc: fr, systemd: fs}
+
+	testCases := []struct {
+		in     *api.Pod
+		out    *appcschema.PodManifest
+		outerr error
+	}{
+		{
+			in: &api.Pod{
+				ObjectMeta: api.ObjectMeta{
+					UID:       "uid-1",
+					Name:      "name-1",
+					Namespace: "namespace-1",
+					Annotations: map[string]string{
+						k8sRktStage1NameAnno: "stage1-override-img",
+					},
+				},
+			},
+			out: &appcschema.PodManifest{
+				Annotations: []appctypes.Annotation{
+					{
+						Name:  appctypes.ACIdentifier(k8sRktStage1NameAnno),
+						Value: "stage1-override-img",
+					},
+					{
+						Name:  appctypes.ACIdentifier(types.KubernetesPodUIDLabel),
+						Value: "uid-1",
+					},
+					{
+						Name:  appctypes.ACIdentifier(types.KubernetesPodNameLabel),
+						Value: "name-1",
+					},
+					{
+						Name:  appctypes.ACIdentifier(k8sRktKubeletAnno),
+						Value: "true",
+					},
+					{
+						Name:  appctypes.ACIdentifier(types.KubernetesPodNamespaceLabel),
+						Value: "namespace-1",
+					},
+					{
+						Name:  appctypes.ACIdentifier(k8sRktRestartCountAnno),
+						Value: "0",
+					},
+				},
+			},
+		},
+	}
+
+	for i, testCase := range testCases {
+		hint := fmt.Sprintf("case #%d", i)
+
+		result, err := r.makePodManifest(testCase.in, "", []api.Secret{})
+		assert.Equal(t, err, testCase.outerr, hint)
+		if err == nil {
+			sort.Sort(annotationsByName(result.Annotations))
+			sort.Sort(annotationsByName(testCase.out.Annotations))
+			assert.Equal(t, result.Annotations, testCase.out.Annotations, hint)
+		}
+	}
+}
+
+func TestPreparePodArgs(t *testing.T) {
+	r := &Runtime{
+		config: &Config{},
+	}
+
+	testCases := []struct {
+		manifest     appcschema.PodManifest
+		stage1Config string
+		cmd          []string
+	}{
+		{
+			appcschema.PodManifest{
+				Annotations: appctypes.Annotations{
+					{
+						Name:  k8sRktStage1NameAnno,
+						Value: "stage1-image",
+					},
+				},
+			},
+			"",
+			[]string{"prepare", "--quiet", "--pod-manifest", "file", "--stage1-name=stage1-image"},
+		},
+		{
+			appcschema.PodManifest{
+				Annotations: appctypes.Annotations{
+					{
+						Name:  k8sRktStage1NameAnno,
+						Value: "stage1-image",
+					},
+				},
+			},
+			"stage1-path",
+			[]string{"prepare", "--quiet", "--pod-manifest", "file", "--stage1-name=stage1-image"},
+		},
+		{
+			appcschema.PodManifest{
+				Annotations: appctypes.Annotations{},
+			},
+			"stage1-path",
+			[]string{"prepare", "--quiet", "--pod-manifest", "file", "--stage1-path=stage1-path"},
+		},
+		{
+			appcschema.PodManifest{
+				Annotations: appctypes.Annotations{},
+			},
+			"",
+			[]string{"prepare", "--quiet", "--pod-manifest", "file"},
+		},
+	}
+
+	for i, testCase := range testCases {
+		r.config.Stage1Image = testCase.stage1Config
+		cmd := r.preparePodArgs(&testCase.manifest, "file")
+		assert.Equal(t, testCase.cmd, cmd, fmt.Sprintf("Test case #%d", i))
 	}
 }

@@ -109,6 +109,7 @@ function check-curl-proxy-code()
 function kubectl-with-retry()
 {
   ERROR_FILE="${KUBE_TEMP}/kubectl-error"
+  preserve_err_file=${PRESERVE_ERR_FILE-false}
   for count in $(seq 0 3); do
     kubectl "$@" 2> ${ERROR_FILE} || true
     if grep -q "the object has been modified" "${ERROR_FILE}"; then
@@ -116,7 +117,9 @@ function kubectl-with-retry()
       rm "${ERROR_FILE}"
       sleep $((2**count))
     else
-      rm "${ERROR_FILE}"
+      if [ "$preserve_err_file" != true ] ; then
+        rm "${ERROR_FILE}"
+      fi
       break
     fi
   done
@@ -291,6 +294,7 @@ runTests() {
   secret_data=".data"
   secret_type=".type"
   deployment_image_field="(index .spec.template.spec.containers 0).image"
+  deployment_second_image_field="(index .spec.template.spec.containers 1).image"
   change_cause_annotation='.*kubernetes.io/change-cause.*'
 
   # Passing no arguments to create is an error
@@ -704,16 +708,20 @@ __EOF__
 __EOF__
   # Post-condition: the node command succeeds
   kube::test::get_object_assert "node node-${version}-test" "{{.metadata.annotations.a}}" 'b'
-  kubectl delete node node-${version}-test
+  kubectl delete node node-${version}-test "${kube_flags[@]}"
 
   ## kubectl edit can update the image field of a POD. tmp-editor.sh is a fake editor
   echo -e '#!/bin/bash\nsed -i "s/nginx/gcr.io\/google_containers\/serve_hostname/g" $1' > /tmp/tmp-editor.sh
   chmod +x /tmp/tmp-editor.sh
-  EDITOR=/tmp/tmp-editor.sh ${KUBE_OUTPUT_HOSTBIN}/kubectl edit "${kube_flags[@]}" pods/valid-pod
+  # Pre-condition: valid-pod POD has image nginx
+  kube::test::get_object_assert pods "{{range.items}}{{$image_field}}:{{end}}" 'nginx:'
+  EDITOR=/tmp/tmp-editor.sh kubectl edit "${kube_flags[@]}" pods/valid-pod
   # Post-condition: valid-pod POD has image gcr.io/google_containers/serve_hostname
   kube::test::get_object_assert pods "{{range.items}}{{$image_field}}:{{end}}" 'gcr.io/google_containers/serve_hostname:'
   # cleaning
   rm /tmp/tmp-editor.sh
+
+  ## kubectl edit should work on Windows
   [ "$(EDITOR=cat kubectl edit pod/valid-pod 2>&1 | grep 'Edit cancelled')" ]
   [ "$(EDITOR=cat kubectl edit pod/valid-pod | grep 'name: valid-pod')" ]
   [ "$(EDITOR=cat kubectl edit --windows-line-endings pod/valid-pod | file - | grep CRLF)" ]
@@ -1059,7 +1067,7 @@ __EOF__
   kube::test::get_object_assert 'rc busybox1' "{{$rc_replicas_field}}" '1'
   # Command
   output_message=$(! kubectl scale --current-replicas=1 --replicas=2 -f hack/testdata/recursive/rc --recursive 2>&1 "${kube_flags[@]}")
-  # Post-condition: busybox0 & busybox replication controllers are scaled to 2 # replicas, and since busybox2 is malformed, it should error
+  # Post-condition: busybox0 & busybox1 replication controllers are scaled to 2 replicas, and since busybox2 is malformed, it should error
   kube::test::get_object_assert 'rc busybox0' "{{$rc_replicas_field}}" '2'
   kube::test::get_object_assert 'rc busybox1' "{{$rc_replicas_field}}" '2'
   kube::test::if_has_string "${output_message}" "Object 'Kind' is missing"
@@ -1073,7 +1081,7 @@ __EOF__
   kube::test::get_object_assert pods "{{range.items}}{{$id_field}}:{{end}}" ''
   kube::test::if_has_string "${output_message}" "Object 'Kind' is missing"
 
-  ### Rollback a deployment
+  ### Rollout on multiple deployments recursively
   # Pre-condition: no deployments exist
   kube::test::get_object_assert deployment "{{range.items}}{{$id_field}}:{{end}}" ''
   # Command
@@ -1081,45 +1089,58 @@ __EOF__
   ! kubectl create -f hack/testdata/recursive/deployment --recursive "${kube_flags[@]}"
   kube::test::get_object_assert deployment "{{range.items}}{{$id_field}}:{{end}}" 'nginx0-deployment:nginx1-deployment:'
   kube::test::get_object_assert deployment "{{range.items}}{{$deployment_image_field}}:{{end}}" "${IMAGE_NGINX}:${IMAGE_NGINX}:"
-  ## Rollback to revision 1 - should be no-op
+  ## Rollback the deployments to revision 1 recursively
   output_message=$(! kubectl rollout undo -f hack/testdata/recursive/deployment --recursive --to-revision=1 2>&1 "${kube_flags[@]}")
+  # Post-condition: nginx0 & nginx1 should be a no-op, and since nginx2 is malformed, it should error
   kube::test::get_object_assert deployment "{{range.items}}{{$deployment_image_field}}:{{end}}" "${IMAGE_NGINX}:${IMAGE_NGINX}:"
   kube::test::if_has_string "${output_message}" "Object 'Kind' is missing"
-  ## Pause the deployment
-  output_message=$(! kubectl rollout pause -f hack/testdata/recursive/deployment --recursive 2>&1 "${kube_flags[@]}")
+  ## Pause the deployments recursively
+  PRESERVE_ERR_FILE=true
+  kubectl-with-retry rollout pause -f hack/testdata/recursive/deployment --recursive "${kube_flags[@]}"
+  output_message=$(cat ${ERROR_FILE})
+  # Post-condition: nginx0 & nginx1 should both have paused set to true, and since nginx2 is malformed, it should error
   kube::test::get_object_assert deployment "{{range.items}}{{.spec.paused}}:{{end}}" "true:true:"
   kube::test::if_has_string "${output_message}" "Object 'Kind' is missing"
-  ## Resume the deployment
-  output_message=$(! kubectl rollout resume -f hack/testdata/recursive/deployment --recursive 2>&1 "${kube_flags[@]}")
+  ## Resume the deployments recursively
+  kubectl-with-retry rollout resume -f hack/testdata/recursive/deployment --recursive "${kube_flags[@]}"
+  output_message=$(cat ${ERROR_FILE})
+  # Post-condition: nginx0 & nginx1 should both have paused set to nothing, and since nginx2 is malformed, it should error
   kube::test::get_object_assert deployment "{{range.items}}{{.spec.paused}}:{{end}}" "<no value>:<no value>:"
   kube::test::if_has_string "${output_message}" "Object 'Kind' is missing"
+  ## Retrieve the rollout history of the deployments recursively
   output_message=$(! kubectl rollout history -f hack/testdata/recursive/deployment --recursive 2>&1 "${kube_flags[@]}")
+  # Post-condition: nginx0 & nginx1 should both have a history, and since nginx2 is malformed, it should error
   kube::test::if_has_string "${output_message}" "nginx0-deployment"
   kube::test::if_has_string "${output_message}" "nginx1-deployment"
   kube::test::if_has_string "${output_message}" "Object 'Kind' is missing"
   # Clean up
+  unset PRESERVE_ERR_FILE
+  rm "${ERROR_FILE}"
   ! kubectl delete -f hack/testdata/recursive/deployment --recursive "${kube_flags[@]}" --grace-period=0
   sleep 1
 
-  ### Rollback a resource that cannot be rolled back (replication controller)
+  ### Rollout on multiple replication controllers recursively - these tests ensure that rollouts cannot be performed on resources that don't support it
   # Pre-condition: no replication controller exists
   kube::test::get_object_assert rc "{{range.items}}{{$id_field}}:{{end}}" ''
   # Command
-  # Create replication controllers (revision 1) recursively from directory of YAML files
+  # Create replication controllers recursively from directory of YAML files
   ! kubectl create -f hack/testdata/recursive/rc --recursive "${kube_flags[@]}"
   kube::test::get_object_assert rc "{{range.items}}{{$id_field}}:{{end}}" 'busybox0:busybox1:'
   # Command
-  ## Rollback to revision 1 - should be no-op
+  ## Attempt to rollback the replication controllers to revision 1 recursively
   output_message=$(! kubectl rollout undo -f hack/testdata/recursive/rc --recursive --to-revision=1 2>&1 "${kube_flags[@]}")
+  # Post-condition: busybox0 & busybox1 should error as they are RC's, and since busybox2 is malformed, it should error
   kube::test::if_has_string "${output_message}" 'no rollbacker has been implemented for {"" "ReplicationController"}'
   kube::test::if_has_string "${output_message}" "Object 'Kind' is missing"
-  ## Pause the deployment
+  ## Attempt to pause the replication controllers recursively
   output_message=$(! kubectl rollout pause -f hack/testdata/recursive/rc --recursive 2>&1 "${kube_flags[@]}")
+  # Post-condition: busybox0 & busybox1 should error as they are RC's, and since busybox2 is malformed, it should error
   kube::test::if_has_string "${output_message}" 'error when pausing "hack/testdata/recursive/rc/busybox.yaml'
   kube::test::if_has_string "${output_message}" 'error when pausing "hack/testdata/recursive/rc/rc/busybox.yaml'
   kube::test::if_has_string "${output_message}" "Object 'Kind' is missing"
-  ## Resume the deployment
+  ## Attempt to resume the replication controllers recursively
   output_message=$(! kubectl rollout resume -f hack/testdata/recursive/rc --recursive 2>&1 "${kube_flags[@]}")
+  # Post-condition: busybox0 & busybox1 should error as they are RC's, and since busybox2 is malformed, it should error
   kube::test::if_has_string "${output_message}" 'error when resuming "hack/testdata/recursive/rc/busybox.yaml'
   kube::test::if_has_string "${output_message}" 'error when resuming "hack/testdata/recursive/rc/rc/busybox.yaml'
   kube::test::if_has_string "${output_message}" "Object 'Kind' is missing"
@@ -1205,6 +1226,16 @@ __EOF__
   kube::test::get_object_assert 'secret/test-secret --namespace=test-secrets' "{{$id_field}}" 'test-secret'
   kube::test::get_object_assert 'secret/test-secret --namespace=test-secrets' "{{$secret_type}}" 'kubernetes.io/dockercfg'
   [[ "$(kubectl get secret/test-secret --namespace=test-secrets -o yaml "${kube_flags[@]}" | grep '.dockercfg:')" ]]
+  # Clean-up
+  kubectl delete secret test-secret --namespace=test-secrets
+
+  ### Create a tls secret
+  # Pre-condition: no SECRET exists
+  kube::test::get_object_assert 'secrets --namespace=test-secrets' "{{range.items}}{{$id_field}}:{{end}}" ''
+  # Command
+  kubectl create secret tls test-secret --namespace=test-secrets --key=hack/testdata/tls.key --cert=hack/testdata/tls.crt
+  kube::test::get_object_assert 'secret/test-secret --namespace=test-secrets' "{{$id_field}}" 'test-secret'
+  kube::test::get_object_assert 'secret/test-secret --namespace=test-secrets' "{{$secret_type}}" 'kubernetes.io/tls'
   # Clean-up
   kubectl delete secret test-secret --namespace=test-secrets
 
@@ -1620,6 +1651,11 @@ __EOF__
   # Clean up
   kubectl delete rc frontend "${kube_flags[@]}"
 
+
+  ######################
+  # Deployments       #
+  ######################
+
   ### Auto scale deployment
   # Pre-condition: no deployment exists
   kube::test::get_object_assert deployment "{{range.items}}{{$id_field}}:{{end}}" ''
@@ -1667,6 +1703,39 @@ __EOF__
   kubectl-with-retry rollout resume deployment nginx-deployment "${kube_flags[@]}"
   # The resumed deployment can now be rolled back
   kubectl rollout undo deployment nginx-deployment "${kube_flags[@]}"
+  # Clean up
+  kubectl delete deployment nginx-deployment "${kube_flags[@]}"
+
+  ### Set image of a deployment 
+  # Pre-condition: no deployment exists
+  kube::test::get_object_assert deployment "{{range.items}}{{$id_field}}:{{end}}" ''
+  # Create a deployment
+  kubectl create -f hack/testdata/deployment-multicontainer.yaml "${kube_flags[@]}"
+  kube::test::get_object_assert deployment "{{range.items}}{{$id_field}}:{{end}}" 'nginx-deployment:'
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_image_field}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_second_image_field}}:{{end}}" "${IMAGE_PERL}:"
+  # Set the deployment's image 
+  kubectl set image deployment nginx-deployment nginx="${IMAGE_DEPLOYMENT_R2}" "${kube_flags[@]}"
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_image_field}}:{{end}}" "${IMAGE_DEPLOYMENT_R2}:"
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_second_image_field}}:{{end}}" "${IMAGE_PERL}:"
+  # Set non-existing container should fail 
+  ! kubectl set image deployment nginx-deployment redis=redis "${kube_flags[@]}"
+  # Set image of deployments without specifying name 
+  kubectl set image deployments --all nginx="${IMAGE_DEPLOYMENT_R1}" "${kube_flags[@]}"
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_image_field}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_second_image_field}}:{{end}}" "${IMAGE_PERL}:"
+  # Set image of a deployment specified by file
+  kubectl set image -f hack/testdata/deployment-multicontainer.yaml nginx="${IMAGE_DEPLOYMENT_R2}" "${kube_flags[@]}"
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_image_field}}:{{end}}" "${IMAGE_DEPLOYMENT_R2}:"
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_second_image_field}}:{{end}}" "${IMAGE_PERL}:"
+  # Set image of a local file without talking to the server 
+  kubectl set image -f hack/testdata/deployment-multicontainer.yaml nginx="${IMAGE_DEPLOYMENT_R1}" "${kube_flags[@]}" --local -o yaml
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_image_field}}:{{end}}" "${IMAGE_DEPLOYMENT_R2}:"
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_second_image_field}}:{{end}}" "${IMAGE_PERL}:"
+  # Set image of all containers of the deployment 
+  kubectl set image deployment nginx-deployment "*"="${IMAGE_DEPLOYMENT_R1}" "${kube_flags[@]}"
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_image_field}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
+  kube::test::get_object_assert deployment "{{range.items}}{{$deployment_second_image_field}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
   # Clean up
   kubectl delete deployment nginx-deployment "${kube_flags[@]}"
 
@@ -2062,7 +2131,7 @@ __EOF__
   object="all -l'app=cassandra'"
   request="{{range.items}}{{range .metadata.labels}}{{.}}:{{end}}{{end}}"
 
-  # all 4 cassandra's might not be in the request immediately... 
+  # all 4 cassandra's might not be in the request immediately...
   kube::test::get_object_assert "$object" "$request" 'cassandra:cassandra:cassandra:cassandra:' || \
   kube::test::get_object_assert "$object" "$request" 'cassandra:cassandra:cassandra:' || \
   kube::test::get_object_assert "$object" "$request" 'cassandra:cassandra:'

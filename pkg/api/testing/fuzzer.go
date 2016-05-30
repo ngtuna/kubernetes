@@ -195,6 +195,8 @@ func FuzzerFor(t *testing.T, version unversioned.GroupVersion, src rand.Source) 
 			randomQuantity := func() resource.Quantity {
 				var q resource.Quantity
 				c.Fuzz(&q)
+				// precalc the string for benchmarking purposes
+				_ = q.String()
 				return q
 			}
 			q.Limits = make(api.ResourceList)
@@ -243,6 +245,7 @@ func FuzzerFor(t *testing.T, version unversioned.GroupVersion, src rand.Source) 
 		func(m *api.DownwardAPIVolumeFile, c fuzz.Continue) {
 			m.Path = c.RandString()
 			versions := []string{"v1"}
+			m.FieldRef = &api.ObjectFieldSelector{}
 			m.FieldRef.APIVersion = versions[c.Rand.Intn(len(versions))]
 			m.FieldRef.FieldPath = c.RandString()
 		},
@@ -340,7 +343,7 @@ func FuzzerFor(t *testing.T, version unversioned.GroupVersion, src rand.Source) 
 		},
 		func(pvc *api.PersistentVolumeClaim, c fuzz.Continue) {
 			c.FuzzNoCustom(pvc) // fuzz self without calling this function again
-			types := []api.PersistentVolumeClaimPhase{api.ClaimBound, api.ClaimPending}
+			types := []api.PersistentVolumeClaimPhase{api.ClaimBound, api.ClaimPending, api.ClaimLost}
 			pvc.Status.Phase = types[c.Rand.Intn(len(types))]
 		},
 		func(s *api.NamespaceSpec, c fuzz.Continue) {

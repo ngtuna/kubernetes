@@ -21,16 +21,17 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/pkg/api/validation"
-	"k8s.io/kubernetes/pkg/genericapiserver"
+	genericoptions "k8s.io/kubernetes/pkg/genericapiserver/options"
 	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
 	"k8s.io/kubernetes/pkg/master/ports"
+	"k8s.io/kubernetes/pkg/registry/generic/registry"
 
 	"github.com/spf13/pflag"
 )
 
 // APIServer runs a kubernetes api server.
 type APIServer struct {
-	*genericapiserver.ServerRunOptions
+	*genericoptions.ServerRunOptions
 	AllowPrivileged             bool
 	EventTTL                    time.Duration
 	KubeletConfig               kubeletclient.KubeletClientConfig
@@ -40,18 +41,20 @@ type APIServer struct {
 	ServiceAccountKeyFile       string
 	ServiceAccountLookup        bool
 	WebhookTokenAuthnConfigFile string
+	WebhookTokenAuthnCacheTTL   time.Duration
 }
 
 // NewAPIServer creates a new APIServer object with default parameters
 func NewAPIServer() *APIServer {
 	s := APIServer{
-		ServerRunOptions: genericapiserver.NewServerRunOptions(),
+		ServerRunOptions: genericoptions.NewServerRunOptions(),
 		EventTTL:         1 * time.Hour,
 		KubeletConfig: kubeletclient.KubeletClientConfig{
 			Port:        ports.KubeletPort,
 			EnableHttps: true,
 			HTTPTimeout: time.Duration(5) * time.Second,
 		},
+		WebhookTokenAuthnCacheTTL: 2 * time.Minute,
 	}
 	return &s
 }
@@ -66,6 +69,7 @@ func (s *APIServer) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.ServiceAccountKeyFile, "service-account-key-file", s.ServiceAccountKeyFile, "File containing PEM-encoded x509 RSA private or public key, used to verify ServiceAccount tokens. If unspecified, --tls-private-key-file is used.")
 	fs.BoolVar(&s.ServiceAccountLookup, "service-account-lookup", s.ServiceAccountLookup, "If true, validate ServiceAccount tokens exist in etcd as part of authentication.")
 	fs.StringVar(&s.WebhookTokenAuthnConfigFile, "authentication-token-webhook-config-file", s.WebhookTokenAuthnConfigFile, "File with webhook configuration for token authentication in kubeconfig format. The API server will query the remote service to determine authentication for bearer tokens.")
+	fs.DurationVar(&s.WebhookTokenAuthnCacheTTL, "authentication-token-webhook-cache-ttl", s.WebhookTokenAuthnCacheTTL, "The duration to cache responses from the webhook token authenticator. Default is 2m")
 	fs.BoolVar(&s.AllowPrivileged, "allow-privileged", s.AllowPrivileged, "If true, allow privileged containers.")
 	fs.StringVar(&s.SSHUser, "ssh-user", s.SSHUser, "If non-empty, use secure SSH proxy to the nodes, using this user name")
 	fs.StringVar(&s.SSHKeyfile, "ssh-keyfile", s.SSHKeyfile, "If non-empty, use secure SSH proxy to the nodes, using this user keyfile")
@@ -80,4 +84,5 @@ func (s *APIServer) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.KubeletConfig.CAFile, "kubelet-certificate-authority", s.KubeletConfig.CAFile, "Path to a cert. file for the certificate authority.")
 	// TODO: delete this flag as soon as we identify and fix all clients that send malformed updates, like #14126.
 	fs.BoolVar(&validation.RepairMalformedUpdates, "repair-malformed-updates", validation.RepairMalformedUpdates, "If true, server will do its best to fix the update request to pass the validation, e.g., setting empty UID in update request to its existing value. This flag can be turned off after we fix all the clients that send malformed updates.")
+	fs.BoolVar(&registry.EnableGarbageCollector, "enable-garbage-collector", false, "Enables the generic garbage collector. MUST be synced with the corresponding flag of the kube-controller-manager.")
 }

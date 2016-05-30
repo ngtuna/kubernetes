@@ -271,6 +271,7 @@ func handleInternal(storage map[string]rest.Storage, admissionControl admission.
 
 		Creater:   api.Scheme,
 		Convertor: api.Scheme,
+		Copier:    api.Scheme,
 		Typer:     api.Scheme,
 		Linker:    selfLinker,
 		Mapper:    namespaceMapper,
@@ -502,13 +503,16 @@ func (storage *SimpleRESTStorage) Create(ctx api.Context, obj runtime.Object) (r
 	return obj, err
 }
 
-func (storage *SimpleRESTStorage) Update(ctx api.Context, obj runtime.Object) (runtime.Object, bool, error) {
+func (storage *SimpleRESTStorage) Update(ctx api.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
 	storage.checkContext(ctx)
+	obj, err := objInfo.UpdatedObject(ctx, &storage.item)
+	if err != nil {
+		return nil, false, err
+	}
 	storage.updated = obj.(*apiservertesting.Simple)
 	if err := storage.errors["update"]; err != nil {
 		return nil, false, err
 	}
-	var err error
 	if storage.injectedFunction != nil {
 		obj, err = storage.injectedFunction(obj)
 	}
@@ -1562,6 +1566,7 @@ func TestGetNamespaceSelfLink(t *testing.T) {
 		t.Errorf("Never set self link")
 	}
 }
+
 func TestGetMissing(t *testing.T) {
 	storage := map[string]rest.Storage{}
 	simpleStorage := SimpleRESTStorage{
@@ -1572,13 +1577,35 @@ func TestGetMissing(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/" + prefix + "/" + testGroupVersion.Group + "/" + testGroupVersion.Version + "/simple/id")
+	resp, err := http.Get(server.URL + "/" + prefix + "/" + testGroupVersion.Group + "/" + testGroupVersion.Version + "/namespaces/default/simple/id")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("Unexpected response %#v", resp)
+	}
+}
+
+func TestGetRetryAfter(t *testing.T) {
+	storage := map[string]rest.Storage{}
+	simpleStorage := SimpleRESTStorage{
+		errors: map[string]error{"get": apierrs.NewServerTimeout(api.Resource("simples"), "id", 2)},
+	}
+	storage["simple"] = &simpleStorage
+	handler := handle(storage)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/" + prefix + "/" + testGroupVersion.Group + "/" + testGroupVersion.Version + "/namespaces/default/simple/id")
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("Unexpected response %#v", resp)
+	}
+	if resp.Header.Get("Retry-After") != "2" {
+		t.Errorf("Unexpected Retry-After header: %v", resp.Header)
 	}
 }
 
@@ -1999,6 +2026,7 @@ func TestPatch(t *testing.T) {
 		ObjectMeta: api.ObjectMeta{
 			Name:      ID,
 			Namespace: "", // update should allow the client to send an empty namespace
+			UID:       "uid",
 		},
 		Other: "bar",
 	}
@@ -2037,6 +2065,7 @@ func TestPatchRequiresMatchingName(t *testing.T) {
 		ObjectMeta: api.ObjectMeta{
 			Name:      ID,
 			Namespace: "", // update should allow the client to send an empty namespace
+			UID:       "uid",
 		},
 		Other: "bar",
 	}
@@ -2376,6 +2405,7 @@ func TestUpdateREST(t *testing.T) {
 			RequestInfoResolver: newTestRequestInfoResolver(),
 			Creater:             api.Scheme,
 			Convertor:           api.Scheme,
+			Copier:              api.Scheme,
 			Typer:               api.Scheme,
 			Linker:              selfLinker,
 
@@ -2460,6 +2490,7 @@ func TestParentResourceIsRequired(t *testing.T) {
 		RequestInfoResolver: newTestRequestInfoResolver(),
 		Creater:             api.Scheme,
 		Convertor:           api.Scheme,
+		Copier:              api.Scheme,
 		Typer:               api.Scheme,
 		Linker:              selfLinker,
 
@@ -2491,6 +2522,7 @@ func TestParentResourceIsRequired(t *testing.T) {
 		RequestInfoResolver: newTestRequestInfoResolver(),
 		Creater:             api.Scheme,
 		Convertor:           api.Scheme,
+		Copier:              api.Scheme,
 		Typer:               api.Scheme,
 		Linker:              selfLinker,
 
@@ -3188,6 +3220,7 @@ func TestXGSubresource(t *testing.T) {
 
 		Creater:   api.Scheme,
 		Convertor: api.Scheme,
+		Copier:    api.Scheme,
 		Typer:     api.Scheme,
 		Linker:    selfLinker,
 		Mapper:    namespaceMapper,

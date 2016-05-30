@@ -98,6 +98,7 @@ kube::build::get_docker_wrapped_binaries() {
           kube-controller-manager,busybox
           kube-scheduler,busybox
           kube-proxy,gcr.io/google_containers/debian-iptables-amd64:v3
+          federation-apiserver,busybox
         );;
     "arm")
         local targets=(
@@ -105,6 +106,7 @@ kube::build::get_docker_wrapped_binaries() {
           kube-controller-manager,armel/busybox
           kube-scheduler,armel/busybox
           kube-proxy,gcr.io/google_containers/debian-iptables-arm:v3
+          federation-apiserver,armel/busybox
         );;
     "arm64")
         local targets=(
@@ -112,6 +114,7 @@ kube::build::get_docker_wrapped_binaries() {
           kube-controller-manager,aarch64/busybox
           kube-scheduler,aarch64/busybox
           kube-proxy,gcr.io/google_containers/debian-iptables-arm64:v3
+          federation-apiserver,aarch64/busybox
         );;
     "ppc64le")
         local targets=(
@@ -119,6 +122,7 @@ kube::build::get_docker_wrapped_binaries() {
           kube-controller-manager,ppc64le/busybox
           kube-scheduler,ppc64le/busybox
           kube-proxy,gcr.io/google_containers/debian-iptables-ppc64le:v3
+          federation-apiserver,ppc64le/busybox
         );;
   esac
 
@@ -308,8 +312,10 @@ function kube::build::clean_output() {
 
 # Make sure the _output directory is created and mountable by docker
 function kube::build::prepare_output() {
+  # See auto-creation of host mounts: https://github.com/docker/docker/pull/21666
+  # if selinux is enabled, docker run -v /foo:/foo:Z will not autocreate the host dir
   mkdir -p "${LOCAL_OUTPUT_SUBPATH}"
-
+  mkdir -p "${LOCAL_OUTPUT_BINPATH}"
   # On RHEL/Fedora SELinux is enabled by default and currently breaks docker
   # volume mounts.  We can work around this by explicitly adding a security
   # context to the _output directory.
@@ -327,7 +333,10 @@ function kube::build::prepare_output() {
     number=${#DOCKER_MOUNT_ARGS[@]}
     for (( i=0; i<number; i++ )); do
       if [[ "${DOCKER_MOUNT_ARGS[i]}" =~ "${KUBE_ROOT}" ]]; then
-        DOCKER_MOUNT_ARGS[i]="${DOCKER_MOUNT_ARGS[i]}:Z"
+        ## Ensure we don't label the argument multiple times
+        if [[ ! "${DOCKER_MOUNT_ARGS[i]}" == *:Z ]]; then
+          DOCKER_MOUNT_ARGS[i]="${DOCKER_MOUNT_ARGS[i]}:Z"
+        fi
       fi
     done
   fi
@@ -469,7 +478,6 @@ function kube::build::source_targets() {
     test
     third_party
     vendor
-    contrib/completions/bash/kubectl
     contrib/mesos
     .generated_docs
   )
@@ -907,6 +915,7 @@ function kube::release::package_kube_manifests_tarball() {
   mkdir -p "${dst_dir}"
 
   local salt_dir="${KUBE_ROOT}/cluster/saltbase/salt"
+  cp "${salt_dir}/cluster-autoscaler/cluster-autoscaler.manifest" "${dst_dir}/"
   cp "${salt_dir}/fluentd-es/fluentd-es.yaml" "${release_stage}/"
   cp "${salt_dir}/fluentd-gcp/fluentd-gcp.yaml" "${release_stage}/"
   cp "${salt_dir}/kube-registry-proxy/kube-registry-proxy.yaml" "${release_stage}/"
@@ -917,7 +926,9 @@ function kube::release::package_kube_manifests_tarball() {
   cp "${salt_dir}/kube-apiserver/abac-authz-policy.jsonl" "${dst_dir}"
   cp "${salt_dir}/kube-controller-manager/kube-controller-manager.manifest" "${dst_dir}"
   cp "${salt_dir}/kube-addons/kube-addon-manager.yaml" "${dst_dir}"
-  cp "${KUBE_ROOT}/cluster/gce/trusty/configure-helper.sh" "${dst_dir}"
+  cp "${KUBE_ROOT}/cluster/gce/trusty/configure-helper.sh" "${dst_dir}/trusty-configure-helper.sh"
+  cp "${KUBE_ROOT}/cluster/gce/gci/configure-helper.sh" "${dst_dir}/gci-configure-helper.sh"
+  cp "${KUBE_ROOT}/cluster/gce/gci/health-monitor.sh" "${dst_dir}/health-monitor.sh"
   cp -r "${salt_dir}/kube-admission-controls/limit-range" "${dst_dir}"
   local objects
   objects=$(cd "${KUBE_ROOT}/cluster/addons" && find . \( -name \*.yaml -or -name \*.yaml.in -or -name \*.json \) | grep -v demo)
@@ -1000,13 +1011,16 @@ function kube::release::package_full_tarball() {
   mkdir -p "${release_stage}/third_party"
   cp -R "${KUBE_ROOT}/third_party/htpasswd" "${release_stage}/third_party/htpasswd"
 
+  # Include only federation/cluster and federation/manifests
+  mkdir "${release_stage}/federation"
+  cp -R "${KUBE_ROOT}/federation/cluster" "${release_stage}/federation/"
+  cp -R "${KUBE_ROOT}/federation/manifests" "${release_stage}/federation/"
+
   cp -R "${KUBE_ROOT}/examples" "${release_stage}/"
   cp -R "${KUBE_ROOT}/docs" "${release_stage}/"
   cp "${KUBE_ROOT}/README.md" "${release_stage}/"
   cp "${KUBE_ROOT}/Godeps/LICENSES" "${release_stage}/"
   cp "${KUBE_ROOT}/Vagrantfile" "${release_stage}/"
-  mkdir -p "${release_stage}/contrib/completions/bash"
-  cp "${KUBE_ROOT}/contrib/completions/bash/kubectl" "${release_stage}/contrib/completions/bash"
 
   echo "${KUBE_GIT_VERSION}" > "${release_stage}/version"
 
@@ -1114,13 +1128,12 @@ function kube::release::gcs::copy_release_artifacts() {
   # Stage everything in release directory
   kube::release::gcs::stage_and_hash "${RELEASE_DIR}"/* . || return 1
 
-  # Having the configure-vm.sh script and trusty code from the GCE cluster
+  # Having the configure-vm.sh script and GCI code from the GCE cluster
   # deploy hosted with the release is useful for GKE.
-  # TODO(andyzheng0831): Replace the trusty path with GCI after finshing the GCI code.
   kube::release::gcs::stage_and_hash "${RELEASE_STAGE}/full/kubernetes/cluster/gce/configure-vm.sh" extra/gce || return 1
-  kube::release::gcs::stage_and_hash "${RELEASE_STAGE}/full/kubernetes/cluster/gce/trusty/node.yaml" extra/gce || return 1
-  kube::release::gcs::stage_and_hash "${RELEASE_STAGE}/full/kubernetes/cluster/gce/trusty/master.yaml" extra/gce || return 1
-  kube::release::gcs::stage_and_hash "${RELEASE_STAGE}/full/kubernetes/cluster/gce/trusty/configure.sh" extra/gce || return 1
+  kube::release::gcs::stage_and_hash "${RELEASE_STAGE}/full/kubernetes/cluster/gce/gci/node.yaml" extra/gce || return 1
+  kube::release::gcs::stage_and_hash "${RELEASE_STAGE}/full/kubernetes/cluster/gce/gci/master.yaml" extra/gce || return 1
+  kube::release::gcs::stage_and_hash "${RELEASE_STAGE}/full/kubernetes/cluster/gce/gci/configure.sh" extra/gce || return 1
 
   # Upload the "naked" binaries to GCS.  This is useful for install scripts that
   # download the binaries directly and don't need tars.
